@@ -1,0 +1,6 @@
+{
+  "name": "File Manager",
+  "description": "Luma Files: High-performance Android file manager with AES-256 PIN-protected Secure Vault, lossless heavy-file studio editors, Advanced Mode tools, and multi-threaded download manager.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

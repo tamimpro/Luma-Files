@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">File Manager</string>
+    <string name="brand_original_name">Luma Files</string>
+    <string name="brand_subtitle">Maximum Access &amp; Lossless Studio</string>
+    <string name="nav_explorer">Explorer</string>
+    <string name="nav_analyzer">Analyzer</string>
+    <string name="nav_vault">Secure Vault</string>
+    <string name="nav_downloads">Downloads</string>
+    <string name="nav_advanced">Advanced</string>
+    <string name="open_with_prompt_title">Open File Permission &amp; Routing</string>
+    <string name="open_with_luma_studio">Open &amp; Edit in Luma Files Studio (Lossless)</string>
+    <string name="open_with_external_app">Open with Another Installed App</string>
+    <string name="secure_vault_title">AES-256 PIN Secure Folder</string>
+    <string name="download_manager_title">Super-Fast Multi-Thread Downloader</string>
+</resources>
