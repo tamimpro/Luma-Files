@@ -1,126 +1,69 @@
-# File Manager (`Luma Files`)
+# File Manager (`Luma Files` v1.1.0)
 
-**File Manager** (branded in-app as **Luma Files**) is a high-performance, security-first Android file manager, lossless multi-format studio, AES-256-GCM PIN-protected vault, and multi-threaded download manager built with Kotlin, Jetpack Compose (Material 3), and Room.
+[![Android CI - File Manager (Luma Files v1.1.0)](https://github.com/YOUR_USERNAME/YOUR_REPO/actions/workflows/android-ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/YOUR_REPO/actions/workflows/android-ci.yml)
 
----
-
-## Key Capabilities
-
-### 1. Maximum Non-Root Android Storage Access
-- **Android 11+ All Files Access (`MANAGE_EXTERNAL_STORAGE`)**: Direct one-tap system settings integration to unlock full shared storage read/write access on non-rooted devices.
-- **Storage Access Framework (`OpenDocumentTree`)**: Persisted URI permissions for mounting external directories, SD cards, and scoped folders.
-- **Pre-Seeded Luma Studio Workspace**: Ready-to-use multi-format workspace initialized on first launch with real `.md`, `.txt`, `.kt`, `.json`, `.docx`, `.pdf`, `.zip`, `.wav`, `.png`, and hidden dotfile samples.
-
-### 2. Open-With Permission & Routing Prompt
-- Every file tap triggers an explicit **Open File Permission & Routing Modal**, letting the user choose between:
-  - **Luma Files Built-In Lossless Studio** (100% original byte quality preserved)
-  - **External Installed Android App** via `FileProvider` and `Intent.createChooser`
-  - **Raw Hex & Checksum Studio** (`MD5` / `SHA-256` + byte patching)
-  - **One-Tap AES-256 Secure Vault Encryption**
-
-### 3. Built-In Lossless Multi-Format Studio (View & Edit)
-- **Text, Markdown & Code (`txt`, `md`, `kt`, `java`, `py`, `json`, `xml`, `html`, `csv`, `log`)**: Line-numbered code editor with live Markdown rendering preview, Find & Replace, encoding support (`UTF-8` / `ISO-8859-1`), 512 KB chunked streaming window, and atomic temporary-file swap on save.
-- **Word OOXML (`docx`) Studio**: Parses and edits `<w:p>` paragraphs directly inside `word/document.xml` and repackages the `.docx` archive without stripping styles, relationships, or embedded media.
-- **Native High-DPI PDF Studio (`pdf`)**: Renders pages natively via Android's `PdfRenderer` with page navigation and companion annotation notes.
-- **ZIP Archive Manager (`zip`, `jar`, `apk`)**: Streams archive entries with uncompressed/compressed byte sizes, compression ratios, and `CRC-32` checksums; supports full extraction (with Zip-Slip traversal protection) and packing new entries into existing archives.
-- **Lossless Audio & Video Studio (`wav`, `mp3`, `flac`, `mp4`, `mkv`)**: Native hardware playback with RIFF/WAVE PCM header telemetry and bitrate/resolution inspection.
-- **High-Res Image Studio (`png`, `jpg`, `webp`)**: 32-bit `ARGB_8888` lossless decoding with resolution, megapixel, and EXIF attribute inspection.
-- **Paginated Raw Hex & ASCII Binary Studio (`*/*`)**: 2 KB sliding byte window via `RandomAccessFile` with live `MD5` & `SHA-256` hashes and single-byte hex patching (`0x00`–`0xFF`).
-
-### 4. AES-256-GCM PIN-Authenticated Secure Vault
-- Configurable **4-digit** or **6-digit numeric PIN** with a security question recovery flow.
-- Derives a 256-bit key using `PBKDF2WithHmacSHA256` (12,000 iterations, 128-bit random salt) and encrypts files via `AES/GCM/NoPadding` (96-bit random IV, 128-bit authentication tag).
-- Verifies bit-exact restoration using `SHA-256` checksum comparison upon decryption.
-
-### 5. Super-Fast Multi-Threaded Download Manager
-- Configurable **1x, 2x, or 4x parallel HTTP `Range` segment workers** (`OkHttp`) with live transfer speed (`KB/s` and `MB/s`), Pause/Resume support, automatic `SHA-256` verification, and an offline-capable **8 MB Synthetic Multi-Stream Benchmark**.
-
-### 6. Dual-Posture UI: User-Friendly Default & Power-User Advanced Mode
-- **Default Mode**: Clean adaptive Dark (`#0B0F17` Obsidian / `#00E5FF` Electric Cyan) and Light (`#F8FAFC` Alabaster / `#0284C7` Deep Cobalt) themes with storage telemetry cards and format studio shortcuts.
-- **Advanced Mode**: Unlocks hidden dotfiles (`.luma_hidden_config`, `.nomedia`), inline POSIX `rwx` permission flags, Regex file filtering, **Batch Regex Rename**, **SHA-256 Duplicate & Large File Storage Analyzer**, and a **Real-Time Diagnostic & Operation Audit Trail** that reports exact technical root causes for any I/O, permission, network, or cryptographic error.
+**File Manager** (internally branded as **Luma Files**) is a lossless Android file workstation, multi-format studio editor, isolated **AES-256-GCM Safe Folder Vault**, and verified multi-threaded HTTP Range download engine built with **Kotlin** and **Jetpack Compose (Material 3)**.
 
 ---
 
-## Architecture Overview
+## How to Download the Built `.apk` from GitHub
 
-```
-┌────────────────────────────────────────────────────────────────────────────┐
-│                        MainActivity & LumaFilesApp                         │
-│     (Edge-to-Edge Scaffold, Adaptive Nav, Open-With Chooser Launcher)      │
-└──────────────────┬──────────────────┬──────────────────┬───────────────────┘
-                   │                  │                  │
-         ┌─────────▼────────┐ ┌───────▼────────┐ ┌───────▼──────────┐
-         │ Explorer &       │ │ Secure Vault & │ │ Multi-Threaded   │
-         │ Studio UI        │ │ PIN Auth UI    │ │ Download UI      │
-         │ (Categories,     │ │ (4/6-Digit Pad,│ │ (URL Queue,      │
-         │  Breadcrumbs,    │ │  Vault List,   │ │  Thread Gauges,  │
-         │  Format Editors, │ │  Decrypt/Open) │ │  Pause/Resume)   │
-         │  Advanced Tools) │ └───────┬────────┘ └───────┬──────────┘
-         └─────────┬────────┘         │                  │
-                   └──────────────────┼──────────────────┘
-                                      ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│                          LumaFilesViewModel (MVVM)                         │
-│   StateFlows: ExplorerState | StudioState | VaultState | DownloadState     │
-│               AdvancedModeState | DiagnosticErrorState                     │
-└─────────┬───────────────────────────┬──────────────────────────┬───────────┘
-          │                           │                          │
-┌─────────▼─────────────┐   ┌─────────▼─────────────┐  ┌─────────▼───────────┐
-│ FileSystem & Format   │   │ CryptoVaultEngine     │  │ FastDownloadEngine  │
-│ Engine                │   │ (PBKDF2 Key Derive,   │  │ (OkHttp Range       │
-│ (Direct File + SAF,   │   │  AES-256-GCM Stream   │  │  Chunk Workers,     │
-│  TXT/MD/Code/DOCX/    │   │  Encrypt/Decrypt,     │  │  Speed Telemetry,   │
-│  PDF/ZIP/Media/Hex,   │   │  SHA-256/MD5 Hasher)  │  │  Exact Error Map)   │
-│  Regex Batch & Dupes) │   └─────────┬─────────────┘  └─────────┬───────────┘
-└─────────┬─────────────┘             │                          │
-          └───────────────────────────┼──────────────────────────┘
-                                      ▼
-┌────────────────────────────────────────────────────────────────────────────┐
-│                   Room Database (LumaDatabase) & FileProvider              │
-│   Entities: VaultItemEntity | DownloadTaskEntity | BookmarkEntity          │
-│             OperationLogEntity (Exact Error Diagnostics & Audit Trail)     │
-└────────────────────────────────────────────────────────────────────────────┘
-```
+Every push to `main` or `master` automatically builds and publishes the installable Android `.apk` in **two places**:
+
+### Option 1: Direct APK Download from **GitHub Releases** (Easiest on Phone)
+1. Open your GitHub repository page.
+2. Tap **Releases** (on the right sidebar on desktop, or under the repository info header on mobile).
+3. Under the latest **`v1.1.x`** release, tap **`LumaFiles-FileManager-v1.1.0.apk`** under **Assets** to download and install the `.apk` directly on your Android device.
+
+### Option 2: Download from **GitHub Actions** Workflow Summary
+1. Open the **Actions** tab in your GitHub repository.
+2. Tap the latest green workflow run (**Build APK, Run Engine Tests & Publish Release**).
+3. Scroll to the **Artifacts** section at the bottom and download **`LumaFiles-FileManager-v1.1.0-APK`**.
+
+> **Troubleshooting GitHub Release Permissions**: If the `Publish Direct APK to GitHub Releases` step ever reports a `403` permission error on a new repository, go to your GitHub repo **Settings -> Actions -> General -> Workflow permissions**, select **Read and write permissions**, and save.
 
 ---
 
-## Tech Stack
+## What's New in v1.1.0
 
-- **Language**: Kotlin
-- **UI Framework**: Jetpack Compose (Material Design 3, Edge-to-Edge, Adaptive Dark/Light Themes)
-- **Typography**: Bundled Google Fonts (`Space Grotesk`, `Plus Jakarta Sans`, `JetBrains Mono`)
-- **Architecture**: MVVM (`AndroidViewModel`, `StateFlow`, Repository pattern)
-- **Local Persistence**: Room Database with KSP (`VaultItemEntity`, `DownloadTaskEntity`, `BookmarkEntity`, `OperationLogEntity`)
-- **Cryptography**: `javax.crypto.Cipher` (`AES/GCM/NoPadding`), `PBKDF2WithHmacSHA256`, `MessageDigest` (`SHA-256`, `MD5`)
-- **Networking**: `OkHttp3` with parallel `Range` byte-stream workers
-- **Testing**: JUnit 4 + Robolectric JVM tests
+### 1. Default Internal Storage Root & Remembered Permission Onboarding
+- **Internal Shared Storage Default**: Opens directly into **Internal Shared Storage (`/storage/emulated/0`)** by default whenever storage access is granted, with instant volume chips for **Internal Storage**, **Removable SD Cards**, **SAF Mounts**, and the **Luma Sample Studio**.
+- **One-Time Permission Setup**: On first launch, a clean **Storage & Permission Setup** modal asks once for All Files Access or SAF mounting and remembers your decision so access control banners don't clutter the interface on every launch.
+
+### 2. Cross-Volume Copy, Move & Batch Operations Engine
+- **Floating Multi-Select & Clipboard Action Dock**: Select multiple files and directories across **Internal Shared Storage**, **Removable SD Cards**, and **Storage Access Framework (`content://` SAF)** trees.
+- **Batch Actions**:
+  - **Copy & Move (Cut)** with recursive directory support and cross-volume stream fallback when moving across physical storage boundaries.
+  - **Conflict Resolution Policies**: Choose **Keep Both (Auto-Rename)**, **Overwrite**, or **Skip** directly from the floating paste dock.
+  - **Batch Compress to `.zip`** and **Batch Lock to AES-256 Safe Vault**.
+
+### 3. Hardened AES-256-GCM Safe Folder Vault (Zero External Visibility)
+- **210,000-Iteration PBKDF2-HMAC-SHA256**: Supports **4-Digit PIN**, **6-Digit High-Entropy PIN**, or **Alphanumeric Master Password** derived with **210,000 iterations** and a **256-bit (32-byte) cryptographic salt**.
+- **Complete Isolation from External File Managers**:
+  - Encrypted files are stored inside `context.noBackupFilesDir/.luma_vault_v11/` with a `.nomedia` sentinel and **opaque randomized UUID filenames (`<uuid>.lvault`)** so no filename or content is ever visible to external file managers or media scanners.
+  - Original source files are **zero-overwritten (`shredAndDeleteFile`)** and flushed via `FileDescriptor.sync()` before unlinking.
+  - Explicit cloud and device-transfer exclusions are enforced in `res/xml/backup_rules.xml` and `res/xml/data_extraction_rules.xml`.
+
+### 4. W3C DOM `.docx` Editing & Power-User Built-In Lossless Studios
+- **W3C DOM Word `.docx` Editor**: Parses `word/document.xml` into a full W3C DOM tree and mutates `<w:t>` text runs in-place while preserving `<w:pPr>`, `<w:pStyle>`, `<w:rPr>` formatting runs, `word/styles.xml`, tables, and relationships.
+- **SQLite Database Browser (`.db`, `.sqlite`, `.sqlite3`)**: Inspect tables, browse rows in a scrollable data grid, and execute custom SQL queries (`SELECT`, `INSERT`, `UPDATE`).
+- **CSV & TSV Interactive Spreadsheet Grid Editor**: Edit cells and column headers inline, add rows, and save RFC-4180 compliant spreadsheets losslessly.
+- **APK Package Inspector (`.apk`)**: Inspect package name, version code/name, Min/Target SDK levels, declared `<uses-permission>` entries, activities, `.dex` bytecode count, and `SHA-256` signature digest.
+- **JSON / XML / YAML Validator & Pretty-Formatter**: One-tap syntax validation and 2-space pretty indentation inside the Code Studio.
+- **PDF Renderer, ZIP Archive Manager, Lossless Media Player & Raw Hex Byte Patcher**.
+
+### 5. Verified Multi-Threaded HTTP Range Download Engine
+- **Strict `Content-Range` Validation**: Validates HTTP `206 Partial Content` and `Content-Range: bytes <start>-<end>/<total>` headers before writing to `RandomAccessFile` offsets, automatically falling back to a single-stream download if a server returns `200 OK`.
+- **Post-Download Integrity Verification**: Verifies exact byte length and computes the full file **MD5** and **SHA-256** checksums upon completion.
 
 ---
 
-## Building & Testing Locally
+## Running Tests & Building Locally
 
-### Prerequisites
-- JDK 17 or JDK 21
-- Android SDK (API 36)
-
-### Build Debug APK
 ```bash
-./gradlew :app:assembleDebug
+# Run automated unit tests for FileSystemAndFormatEngine, CryptoVaultEngine & FastDownloadEngine
+gradle :app:testDebugUnitTest
+
+# Build the Debug APK
+gradle :app:assembleDebug
 ```
-The compiled APK will be generated at:
-`app/build/outputs/apk/debug/app-debug.apk`
-
-### Run Unit & Robolectric Tests
-```bash
-./gradlew :app:testDebugUnitTest
-```
-
----
-
-## GitHub Actions CI/CD Workflow
-
-This repository includes an automated GitHub Actions workflow at `.github/workflows/android-ci.yml` that:
-1. Sets up JDK 21 and the Android Gradle cache.
-2. Runs unit & Robolectric verification tests (`:app:testDebugUnitTest`).
-3. Builds the debug APK (`:app:assembleDebug`).
-4. Uploads the resulting `LumaFiles-FileManager-debug-apk` artifact on every push, pull request, or manual dispatch.

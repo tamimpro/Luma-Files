@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -23,8 +22,12 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.SdStorage
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.VerifiedUser
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
@@ -60,6 +63,200 @@ import com.example.ui.LumaFormatUtils
 import com.example.ui.theme.JetBrainsMonoFontFamily
 
 @Composable
+fun FirstLaunchPermissionOnboardingDialog(
+    onGrantAllFilesAccess: () -> Unit,
+    onMountSafFolder: () -> Unit,
+    onContinueAndRemember: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onContinueAndRemember,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Security,
+                    contentDescription = "Storage Access Setup",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(28.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column {
+                    Text(
+                        text = "Storage & Permission Setup",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        text = "Luma Files v1.1.0 • Remembered Automatically",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "To browse Internal Shared Storage (/storage/emulated/0), SD cards, and edit files across your device, grant All Files Access once. Your decision is remembered so this prompt won't interrupt you again.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { onGrantAllFilesAccess() }
+                        .testTag("onboarding_grant_all_files_btn"),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.SdStorage,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(26.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Grant All Files Access (Recommended)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Text(
+                                text = "Opens Internal Shared Storage by default with full read/write speed",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                            )
+                        }
+                    }
+                }
+
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { onMountSafFolder() }
+                        .testTag("onboarding_mount_saf_btn"),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FolderOpen,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Mount Specific Folder or SD Card (SAF)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                text = "Grant scoped directory tree access via Android Storage Access Framework",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onGrantAllFilesAccess,
+                modifier = Modifier.testTag("onboarding_primary_grant_btn")
+            ) {
+                Text("Grant All Files Access")
+            }
+        },
+        dismissButton = {
+            TextButton(
+                onClick = onContinueAndRemember,
+                modifier = Modifier.testTag("onboarding_remember_skip_btn")
+            ) {
+                Text("Remember & Continue")
+            }
+        }
+    )
+}
+
+@Composable
+fun BatchZipNameDialog(
+    selectedCount: Int,
+    onConfirm: (archiveName: String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var archiveName by remember { mutableStateOf("Luma_Bundle_${selectedCount}_Files.zip") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.FolderZip,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Compress $selectedCount Item(s) to ZIP")
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Creates a standard deflate ZIP archive in the current directory with recursive folder support.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = archiveName,
+                    onValueChange = { archiveName = it },
+                    label = { Text("Archive Filename (.zip)") },
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("batch_zip_name_input")
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (archiveName.isNotBlank()) {
+                        onConfirm(archiveName.trim())
+                        onDismiss()
+                    }
+                },
+                modifier = Modifier.testTag("confirm_batch_zip_btn")
+            ) {
+                Text("Compress to ZIP")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
 fun OpenWithPermissionDialog(
     fileNode: FileNode,
     isAdvancedMode: Boolean,
@@ -82,7 +279,7 @@ fun OpenWithPermissionDialog(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column {
                     Text(
-                        text = "Open File Permission",
+                        text = "Open File Studio Router",
                         style = MaterialTheme.typography.titleLarge
                     )
                     Text(
@@ -158,7 +355,7 @@ fun OpenWithPermissionDialog(
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "100% original byte quality preserved • Built-in ${fileNode.category.badgeText} viewer/editor",
+                                text = "100% original byte quality preserved • Built-in ${fileNode.category.badgeText} Studio",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                             )
@@ -203,7 +400,7 @@ fun OpenWithPermissionDialog(
                     }
                 }
 
-                // Option 3: Raw Hex & Binary Inspector (Always available or highlighted in Advanced Mode)
+                // Option 3: Raw Hex & Binary Inspector
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -256,7 +453,7 @@ fun OpenWithPermissionDialog(
                         modifier = Modifier.size(18.dp)
                     )
                     Spacer(modifier = Modifier.width(8.dp))
-                    Text("Encrypt into PIN Secure Vault (AES-256)")
+                    Text("Lock & Shred into AES-256 Vault (.lvault)")
                 }
             }
         },
@@ -551,10 +748,10 @@ fun CreateFileOrFolderDialog(
 
     val quickTemplates = listOf(
         "Markdown (.md)" to "Notes.md",
-        "Text (.txt)" to "Document.txt",
+        "CSV Grid (.csv)" to "Metrics.csv",
         "Word (.docx)" to "Report.docx",
-        "Kotlin (.kt)" to "Script.kt",
-        "JSON (.json)" to "Config.json"
+        "JSON (.json)" to "Config.json",
+        "XML (.xml)" to "Manifest.xml"
     )
 
     AlertDialog(
@@ -598,7 +795,14 @@ fun CreateFileOrFolderDialog(
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant,
-                                modifier = Modifier.clickable { name = suggested }
+                                modifier = Modifier.clickable {
+                                    name = suggested
+                                    if (suggested.endsWith(".csv")) {
+                                        content = "ID,Component,Status,LatencyMs\n1,CoreEngine,READY,4.2\n2,VaultCrypto,LOCKED,1.8"
+                                    } else if (suggested.endsWith(".json")) {
+                                        content = "{\n  \"engine\": \"Luma Files\",\n  \"version\": \"1.1.0\"\n}"
+                                    }
+                                }
                             ) {
                                 Text(
                                     text = label,

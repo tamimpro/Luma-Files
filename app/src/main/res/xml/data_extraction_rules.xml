@@ -1,19 +1,19 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample data extraction rules file; uncomment and customize as necessary.
-   See https://developer.android.com/about/versions/12/backup-restore#xml-changes
-   for details.
--->
+<?xml version="1.0" encoding="utf-8"?>
 <data-extraction-rules>
     <cloud-backup>
-        <!-- TODO: Use <include> and <exclude> to control what is backed up.
-        <include .../>
-        <exclude .../>
-        -->
+        <exclude domain="sharedpref" path="luma_vault_security_prefs.xml" />
+        <exclude domain="database" path="luma_files_db" />
+        <exclude domain="database" path="luma_files_db-shm" />
+        <exclude domain="database" path="luma_files_db-wal" />
+        <exclude domain="file" path=".luma_secure_vault" />
+        <exclude domain="file" path=".luma_vault_v11" />
     </cloud-backup>
-    <!--
     <device-transfer>
-        <include .../>
-        <exclude .../>
+        <exclude domain="sharedpref" path="luma_vault_security_prefs.xml" />
+        <exclude domain="database" path="luma_files_db" />
+        <exclude domain="database" path="luma_files_db-shm" />
+        <exclude domain="database" path="luma_files_db-wal" />
+        <exclude domain="file" path=".luma_secure_vault" />
+        <exclude domain="file" path=".luma_vault_v11" />
     </device-transfer>
-    -->
 </data-extraction-rules>

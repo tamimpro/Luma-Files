@@ -60,9 +60,11 @@ import com.example.domain.model.LumaTab
 import com.example.ui.LumaFilesViewModel
 import com.example.ui.LumaFormatUtils
 import com.example.ui.components.BatchRegexRenameDialog
+import com.example.ui.components.BatchZipNameDialog
 import com.example.ui.components.CreateFileOrFolderDialog
 import com.example.ui.components.ExactDiagnosticErrorDialog
 import com.example.ui.components.FileChecksumInspectorDialog
+import com.example.ui.components.FirstLaunchPermissionOnboardingDialog
 import com.example.ui.components.OpenWithPermissionDialog
 import com.example.ui.screens.AdvancedWorkstationHubScreen
 import com.example.ui.screens.DownloadManagerScreen
@@ -100,6 +102,7 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
 
     var showCreateDialog by remember { mutableStateOf(false) }
     var showBatchRenameDialog by remember { mutableStateOf(false) }
+    var showBatchZipDialog by remember { mutableStateOf(false) }
 
     // All Files Access Settings Launcher
     val allFilesSettingsLauncher = rememberLauncherForActivityResult(
@@ -117,9 +120,10 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
         }
     }
 
-    // Back button handling for directory stack & secondary tabs
+    // Back button handling for directory stack, multi-select & secondary tabs
     BackHandler(
         enabled = state.activeStudioContent != null ||
+            state.selectedFilePaths.isNotEmpty() ||
             state.selectedCategoryFilter != null ||
             state.directoryStack.size > 1 ||
             state.activeTab != LumaTab.EXPLORER
@@ -224,6 +228,7 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
                         LumaTab.EXPLORER -> ExplorerScreen(
                             state = state,
                             onRequestAllFilesAccess = {
+                                viewModel.dismissPermissionOnboarding(rememberDecision = true)
                                 runCatching {
                                     allFilesSettingsLauncher.launch(
                                         LumaFormatUtils.buildAllFilesAccessIntent(context)
@@ -237,6 +242,7 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
                                 }
                             },
                             onRequestSafFolderMount = {
+                                viewModel.dismissPermissionOnboarding(rememberDecision = true)
                                 runCatching {
                                     safTreeLauncher.launch(null)
                                 }.onFailure { err ->
@@ -266,6 +272,33 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
                             onSearchChanged = { q, regex -> viewModel.updateSearchQuery(q, regex) },
                             onSortChanged = { opt -> viewModel.setSortOption(opt) },
                             onFileTapped = { node -> viewModel.onFileNodeTapped(node) },
+                            onToggleSelectFile = { node -> viewModel.toggleFileSelection(node) },
+                            onSelectAllInDir = { viewModel.selectAllInCurrentDir() },
+                            onClearSelection = { viewModel.clearSelection() },
+                            onStageSingleClipboard = { node, isMove ->
+                                viewModel.stageSingleFileForClipboard(node, isMove)
+                            },
+                            onStageBatchClipboard = { isMove ->
+                                viewModel.stageSelectedForClipboard(isMove)
+                            },
+                            onSetConflictPolicy = { policy ->
+                                viewModel.setClipboardConflictPolicy(policy)
+                            },
+                            onPasteClipboardHere = {
+                                viewModel.pasteClipboardToCurrentDirectory()
+                            },
+                            onClearClipboard = {
+                                viewModel.clearClipboard()
+                            },
+                            onBatchDeleteSelected = {
+                                viewModel.batchDeleteSelected()
+                            },
+                            onShowBatchZipDialog = {
+                                showBatchZipDialog = true
+                            },
+                            onBatchEncryptSelected = {
+                                viewModel.batchEncryptSelectedToVault()
+                            },
                             onEncryptToVault = { node -> viewModel.moveFileToSecureVault(node) },
                             onInspectChecksums = { node -> viewModel.inspectFileChecksums(node) },
                             onRenameFile = { node, newName -> viewModel.renameItem(node, newName) },
@@ -285,11 +318,15 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
                         LumaTab.VAULT -> SecureVaultScreen(
                             state = state,
                             vaultItems = vaultItems,
-                            onSetupPin = { pin, len, q, a -> viewModel.setupVaultPin(pin, len, q, a) },
-                            onUnlockPin = { pin -> viewModel.unlockVaultWithPin(pin) },
+                            onSetupCredential = { secret, mode, q, a ->
+                                viewModel.setupVaultCredential(secret, mode, q, a)
+                            },
+                            onUnlockVault = { secret ->
+                                viewModel.unlockVaultWithPin(secret)
+                            },
                             onLockVault = { viewModel.lockVaultSession() },
-                            onResetPinWithRecovery = { ans, newPin, len ->
-                                viewModel.resetPinViaRecovery(ans, newPin, len)
+                            onResetWithRecovery = { ans, newSecret, newMode ->
+                                viewModel.resetPinViaRecovery(ans, newSecret, newMode)
                             },
                             onRestoreVaultItem = { item -> viewModel.restoreFileFromSecureVault(item) },
                             onGoToExplorerToLockFiles = { viewModel.selectTab(LumaTab.EXPLORER) }
@@ -339,8 +376,20 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
                     onSaveText = { node, newText, enc ->
                         viewModel.saveTextEditorChanges(node, newText, enc)
                     },
+                    onFormatStructuredText = { node, rawText, enc ->
+                        viewModel.formatStructuredTextInStudio(node, rawText, enc)
+                    },
                     onSaveDocx = { node, paragraphs ->
                         viewModel.saveDocxEditorChanges(node, paragraphs)
+                    },
+                    onSaveCsvGrid = { node, delimiter, headers, rows ->
+                        viewModel.saveCsvGridChanges(node, delimiter, headers, rows)
+                    },
+                    onSelectSqliteTable = { node, tableName ->
+                        viewModel.selectSqliteTableInStudio(node, tableName)
+                    },
+                    onExecuteSqliteQuery = { node, activeTable, sqlQuery ->
+                        viewModel.executeSqliteQueryInStudio(node, activeTable, sqlQuery)
                     },
                     onSavePdfNotes = { node, notes ->
                         viewModel.savePdfAnnotation(node, notes)
@@ -371,6 +420,35 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
     }
 
     // ==================== DIALOGS & MODALS ====================
+
+    // 0. First-Launch Permission & Storage Setup Modal (Remembered so it only shows once)
+    if (state.showPermissionOnboardingDialog) {
+        FirstLaunchPermissionOnboardingDialog(
+            onGrantAllFilesAccess = {
+                viewModel.dismissPermissionOnboarding(rememberDecision = true)
+                runCatching {
+                    allFilesSettingsLauncher.launch(
+                        LumaFormatUtils.buildAllFilesAccessIntent(context)
+                    )
+                }.onFailure { err ->
+                    viewModel.reportDiagnosticError(
+                        "Launch All Files Access Settings",
+                        "android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION",
+                        err
+                    )
+                }
+            },
+            onMountSafFolder = {
+                viewModel.dismissPermissionOnboarding(rememberDecision = true)
+                runCatching {
+                    safTreeLauncher.launch(null)
+                }
+            },
+            onContinueAndRemember = {
+                viewModel.dismissPermissionOnboarding(rememberDecision = true)
+            }
+        )
+    }
 
     // 1. Open-With Permission & Routing Prompt (Shown whenever user taps a file)
     state.pendingOpenWithFile?.let { targetNode ->
@@ -433,7 +511,18 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
         )
     }
 
-    // 5. Exact Error Diagnostic Report Dialog
+    // 5. Batch Compress Selected to ZIP Dialog
+    if (showBatchZipDialog) {
+        BatchZipNameDialog(
+            selectedCount = state.selectedFilePaths.size,
+            onConfirm = { archiveName ->
+                viewModel.batchCompressSelectedToZip(archiveName)
+            },
+            onDismiss = { showBatchZipDialog = false }
+        )
+    }
+
+    // 6. Exact Error Diagnostic Report Dialog
     state.activeDiagnosticError?.let { diagError ->
         ExactDiagnosticErrorDialog(
             error = diagError,

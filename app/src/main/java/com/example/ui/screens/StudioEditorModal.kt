@@ -30,14 +30,19 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.AutoFixHigh
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FindReplace
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Save
+import androidx.compose.material.icons.filled.Storage
+import androidx.compose.material.icons.filled.TableChart
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Button
@@ -74,6 +79,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import com.example.domain.model.DocxParagraphNode
 import com.example.domain.model.FileNode
 import com.example.domain.model.StudioContent
 import com.example.ui.LumaFormatUtils
@@ -85,7 +91,11 @@ fun StudioEditorModal(
     studioContent: StudioContent,
     onClose: () -> Unit,
     onSaveText: (FileNode, String, String) -> Unit,
+    onFormatStructuredText: (FileNode, String, String) -> Unit,
     onSaveDocx: (FileNode, List<String>) -> Unit,
+    onSaveCsvGrid: (FileNode, Char, List<String>, List<List<String>>) -> Unit,
+    onSelectSqliteTable: (FileNode, String) -> Unit,
+    onExecuteSqliteQuery: (FileNode, String, String) -> Unit,
     onSavePdfNotes: (FileNode, String) -> Unit,
     onNavigatePdfPage: (FileNode, Int) -> Unit,
     onExtractZip: (FileNode) -> Unit,
@@ -104,6 +114,9 @@ fun StudioEditorModal(
         is StudioContent.MediaStudio -> studioContent.file
         is StudioContent.ImageStudio -> studioContent.file
         is StudioContent.HexBinaryStudio -> studioContent.file
+        is StudioContent.CsvGridStudio -> studioContent.file
+        is StudioContent.SqliteStudio -> studioContent.file
+        is StudioContent.ApkInspectorStudio -> studioContent.file
     }
 
     Surface(
@@ -141,7 +154,7 @@ fun StudioEditorModal(
                             maxLines = 1
                         )
                         Text(
-                            text = "Luma Studio (${activeNode.category.badgeText}) • ${LumaFormatUtils.formatBytes(activeNode.sizeBytes)} • 100% Lossless",
+                            text = "Luma Studio v1.1 (${activeNode.category.badgeText}) • ${LumaFormatUtils.formatBytes(activeNode.sizeBytes)} • Lossless",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.primary
                         )
@@ -182,6 +195,9 @@ fun StudioEditorModal(
                         content = studioContent,
                         onSave = { updatedText, encoding ->
                             onSaveText(studioContent.file, updatedText, encoding)
+                        },
+                        onFormatStructured = { rawText, encoding ->
+                            onFormatStructuredText(studioContent.file, rawText, encoding)
                         }
                     )
 
@@ -190,6 +206,27 @@ fun StudioEditorModal(
                         onSave = { paragraphs ->
                             onSaveDocx(studioContent.file, paragraphs)
                         }
+                    )
+
+                    is StudioContent.CsvGridStudio -> CsvGridStudioPane(
+                        content = studioContent,
+                        onSave = { delimiter, headers, rows ->
+                            onSaveCsvGrid(studioContent.file, delimiter, headers, rows)
+                        }
+                    )
+
+                    is StudioContent.SqliteStudio -> SqliteStudioPane(
+                        content = studioContent,
+                        onSelectTable = { table ->
+                            onSelectSqliteTable(studioContent.file, table)
+                        },
+                        onExecuteSql = { sql ->
+                            onExecuteSqliteQuery(studioContent.file, studioContent.selectedTable, sql)
+                        }
+                    )
+
+                    is StudioContent.ApkInspectorStudio -> ApkInspectorStudioPane(
+                        content = studioContent
                     )
 
                     is StudioContent.PdfViewer -> PdfStudioPane(
@@ -224,7 +261,8 @@ fun StudioEditorModal(
 @Composable
 private fun TextAndMarkdownStudioPane(
     content: StudioContent.TextCodeEditor,
-    onSave: (String, String) -> Unit
+    onSave: (String, String) -> Unit,
+    onFormatStructured: (String, String) -> Unit
 ) {
     var editedText by remember(content.file.path, content.textContent) {
         mutableStateOf(content.textContent)
@@ -247,7 +285,12 @@ private fun TextAndMarkdownStudioPane(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier
+                    .weight(1f)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 if (content.isMarkdown) {
                     FilterChip(
                         selected = showMarkdownPreview,
@@ -256,6 +299,17 @@ private fun TextAndMarkdownStudioPane(
                         leadingIcon = {
                             Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(16.dp))
                         }
+                    )
+                }
+                if (content.isStructuredData) {
+                    FilterChip(
+                        selected = true,
+                        onClick = { onFormatStructured(editedText, encoding) },
+                        label = { Text("Format & Validate ${content.file.extension.uppercase()}") },
+                        leadingIcon = {
+                            Icon(Icons.Default.AutoFixHigh, contentDescription = null, modifier = Modifier.size(16.dp))
+                        },
+                        modifier = Modifier.testTag("format_structured_text_btn")
                     )
                 }
                 FilterChip(
@@ -268,6 +322,8 @@ private fun TextAndMarkdownStudioPane(
                 )
             }
 
+            Spacer(modifier = Modifier.width(8.dp))
+
             Button(
                 onClick = { onSave(editedText, encoding) },
                 modifier = Modifier.testTag("save_text_studio_btn")
@@ -275,6 +331,31 @@ private fun TextAndMarkdownStudioPane(
                 Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(modifier = Modifier.width(6.dp))
                 Text("Save Lossless")
+            }
+        }
+
+        if (content.validationMessage != null) {
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.65f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = content.validationMessage,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
             }
         }
 
@@ -337,7 +418,6 @@ private fun TextAndMarkdownStudioPane(
         HorizontalDivider()
 
         if (showMarkdownPreview && content.isMarkdown) {
-            // Rendered Markdown Preview
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -369,7 +449,6 @@ private fun TextAndMarkdownStudioPane(
                 }
             }
         } else {
-            // Line-numbered Code & Text Editor
             Row(
                 modifier = Modifier
                     .fillMaxSize()
@@ -416,8 +495,8 @@ private fun DocxStudioPane(
     content: StudioContent.DocxEditor,
     onSave: (List<String>) -> Unit
 ) {
-    val paragraphs = remember(content.file.path, content.paragraphs) {
-        mutableStateListOf(*content.paragraphs.toTypedArray())
+    val paragraphNodes = remember(content.file.path, content.paragraphNodes) {
+        mutableStateListOf(*content.paragraphNodes.toTypedArray())
     }
     var newParagraphText by remember { mutableStateOf("") }
 
@@ -440,17 +519,17 @@ private fun DocxStudioPane(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Word OOXML (.docx) Archive Studio",
+                        text = "Word OOXML (.docx) W3C DOM Studio",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
                     Text(
-                        text = "${content.xmlEntriesCount} XML Parts • ${content.embeddedMediaCount} Media Streams • Direct word/document.xml Editor",
+                        text = "${content.xmlEntriesCount} XML Parts • ${content.preservedStylesCount} Styles (<w:pPr>/<w:rPr> Preserved)",
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
                 Button(
-                    onClick = { onSave(paragraphs.toList()) },
+                    onClick = { onSave(paragraphNodes.map { it.text }) },
                     modifier = Modifier.testTag("save_docx_btn")
                 ) {
                     Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
@@ -469,14 +548,21 @@ private fun DocxStudioPane(
             OutlinedTextField(
                 value = newParagraphText,
                 onValueChange = { newParagraphText = it },
-                label = { Text("Add New Paragraph (<w:p>)") },
+                label = { Text("Append New OOXML Paragraph (<w:p>)") },
                 singleLine = true,
                 modifier = Modifier.weight(1f)
             )
             Button(
                 onClick = {
                     if (newParagraphText.isNotBlank()) {
-                        paragraphs.add(newParagraphText.trim())
+                        paragraphNodes.add(
+                            DocxParagraphNode(
+                                index = paragraphNodes.size,
+                                text = newParagraphText.trim(),
+                                styleId = "BodyText",
+                                hasRunFormatting = false
+                            )
+                        )
                         newParagraphText = ""
                     }
                 }
@@ -489,7 +575,7 @@ private fun DocxStudioPane(
             modifier = Modifier.fillMaxSize(),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            itemsIndexed(paragraphs) { index, para ->
+            itemsIndexed(paragraphNodes) { index, node ->
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     modifier = Modifier.fillMaxWidth()
@@ -500,14 +586,43 @@ private fun DocxStudioPane(
                             horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(
-                                text = "Paragraph #${index + 1}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                            if (paragraphs.size > 1) {
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Paragraph #${index + 1}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = MaterialTheme.colorScheme.primaryContainer
+                                ) {
+                                    Text(
+                                        text = "w:pStyle=${node.styleId}",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                                if (node.hasRunFormatting) {
+                                    Surface(
+                                        shape = RoundedCornerShape(6.dp),
+                                        color = MaterialTheme.colorScheme.secondaryContainer
+                                    ) {
+                                        Text(
+                                            text = "w:rPr Preserved",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                        )
+                                    }
+                                }
+                            }
+                            if (paragraphNodes.size > 1) {
                                 IconButton(
-                                    onClick = { paragraphs.removeAt(index) },
+                                    onClick = { paragraphNodes.removeAt(index) },
                                     modifier = Modifier.size(28.dp)
                                 ) {
                                     Icon(
@@ -521,10 +636,440 @@ private fun DocxStudioPane(
                         }
                         Spacer(modifier = Modifier.height(6.dp))
                         OutlinedTextField(
-                            value = para,
-                            onValueChange = { paragraphs[index] = it },
+                            value = node.text,
+                            onValueChange = { updated ->
+                                paragraphNodes[index] = node.copy(text = updated)
+                            },
                             modifier = Modifier.fillMaxWidth()
                         )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CsvGridStudioPane(
+    content: StudioContent.CsvGridStudio,
+    onSave: (Char, List<String>, List<List<String>>) -> Unit
+) {
+    val headers = remember(content.file.path, content.headers) {
+        mutableStateListOf(*content.headers.toTypedArray())
+    }
+    val rows = remember(content.file.path, content.rows) {
+        mutableStateListOf(*content.rows.map { it.toMutableList() }.toTypedArray())
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(12.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.TableChart,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = "Interactive CSV / TSV Spreadsheet Grid",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${rows.size} Rows × ${headers.size} Columns • Delimiter: '${if (content.delimiter == '\t') "TAB" else content.delimiter.toString()}'",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            rows.add(MutableList(headers.size) { "" })
+                        },
+                        modifier = Modifier.testTag("csv_add_row_btn")
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Row")
+                    }
+                    Button(
+                        onClick = {
+                            onSave(content.delimiter, headers.toList(), rows.map { it.toList() })
+                        },
+                        modifier = Modifier.testTag("save_csv_grid_btn")
+                    ) {
+                        Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Save Grid")
+                    }
+                }
+            }
+        }
+
+        val horizontalScroll = rememberScrollState()
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .horizontalScroll(horizontalScroll)
+        ) {
+            // Header Row
+            Row(
+                modifier = Modifier
+                    .background(
+                        MaterialTheme.colorScheme.primaryContainer,
+                        RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)
+                    )
+                    .padding(vertical = 8.dp, horizontal = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Box(modifier = Modifier.width(42.dp), contentAlignment = Alignment.Center) {
+                    Text("#", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+                }
+                headers.forEachIndexed { colIndex, colName ->
+                    OutlinedTextField(
+                        value = colName,
+                        onValueChange = { headers[colIndex] = it },
+                        singleLine = true,
+                        textStyle = TextStyle(
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        ),
+                        modifier = Modifier.width(150.dp)
+                    )
+                }
+            }
+
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                itemsIndexed(rows) { rowIndex, rowCells ->
+                    Row(
+                        modifier = Modifier
+                            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
+                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Box(modifier = Modifier.width(42.dp), contentAlignment = Alignment.Center) {
+                            Text(
+                                text = "${rowIndex + 1}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        for (colIndex in headers.indices) {
+                            val cellVal = rowCells.getOrElse(colIndex) { "" }
+                            OutlinedTextField(
+                                value = cellVal,
+                                onValueChange = { updated ->
+                                    val copy = rowCells.toMutableList()
+                                    while (copy.size <= colIndex) copy.add("")
+                                    copy[colIndex] = updated
+                                    rows[rowIndex] = copy
+                                },
+                                singleLine = true,
+                                textStyle = TextStyle(
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    fontSize = 12.sp
+                                ),
+                                modifier = Modifier.width(150.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SqliteStudioPane(
+    content: StudioContent.SqliteStudio,
+    onSelectTable: (String) -> Unit,
+    onExecuteSql: (String) -> Unit
+) {
+    var sqlQuery by remember(content.selectedTable) {
+        mutableStateOf("SELECT * FROM `${content.selectedTable}` LIMIT 100")
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Card(
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(
+                modifier = Modifier.padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Storage,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = "SQLite Database Table & Query Engine",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "${content.tableNames.size} Tables • Active: '${content.selectedTable}' (${content.totalRowsInTable} total rows)",
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                    }
+                }
+
+                // Table Selector Chips
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    content.tableNames.forEach { table ->
+                        FilterChip(
+                            selected = table == content.selectedTable,
+                            onClick = { onSelectTable(table) },
+                            label = { Text(table) }
+                        )
+                    }
+                }
+
+                // SQL Query Input Bar
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = sqlQuery,
+                        onValueChange = { nextSql -> sqlQuery = nextSql },
+                        label = { Text("SQL Query (SELECT / INSERT / UPDATE)") },
+                        singleLine = true,
+                        textStyle = TextStyle(fontFamily = JetBrainsMonoFontFamily, fontSize = 12.sp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("sqlite_query_input")
+                    )
+                    Button(
+                        onClick = { onExecuteSql(sqlQuery) },
+                        modifier = Modifier.testTag("execute_sqlite_query_btn")
+                    ) {
+                        Text("Run SQL")
+                    }
+                }
+            }
+        }
+
+        // Results Grid
+        val horizontalScroll = rememberScrollState()
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .horizontalScroll(horizontalScroll)
+        ) {
+            Row(
+                modifier = Modifier
+                    .background(
+                        MaterialTheme.colorScheme.primaryContainer,
+                        RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)
+                    )
+                    .padding(horizontal = 10.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                content.columns.forEach { col ->
+                    Text(
+                        text = col,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.width(140.dp)
+                    )
+                }
+            }
+
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                itemsIndexed(content.rows) { idx, row ->
+                    Row(
+                        modifier = Modifier
+                            .background(
+                                if (idx % 2 == 0) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                                RoundedCornerShape(6.dp)
+                            )
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        row.forEach { cell ->
+                            Text(
+                                text = cell,
+                                fontFamily = JetBrainsMonoFontFamily,
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.width(140.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ApkInspectorStudioPane(
+    content: StudioContent.ApkInspectorStudio
+) {
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Android,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(42.dp)
+                    )
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column {
+                        Text(
+                            text = content.file.name,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Text(
+                            text = "Package: ${content.packageName}",
+                            fontFamily = JetBrainsMonoFontFamily,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Text(
+                            text = "Version: ${content.versionName} (Code ${content.versionCode}) • Min SDK ${content.minSdk} / Target SDK ${content.targetSdk}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "DEX & Cryptographic Signature Telemetry",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "DEX Bytecode Files: ${content.dexFilesCount} • Total ZIP Entries: ${content.totalEntriesCount}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        text = "SHA-256 Digest:\n${content.sha256Signature}",
+                        fontFamily = JetBrainsMonoFontFamily,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
+        }
+
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text(
+                        text = "Declared Android Permissions (${content.permissions.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    if (content.permissions.isEmpty()) {
+                        Text("No manifest permissions declared.", style = MaterialTheme.typography.bodySmall)
+                    } else {
+                        content.permissions.forEach { perm ->
+                            Text(
+                                text = "• $perm",
+                                fontFamily = JetBrainsMonoFontFamily,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (content.activities.isNotEmpty()) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = "Exported & Internal Activities (${content.activities.size})",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        content.activities.forEach { act ->
+                            Text(
+                                text = "• $act",
+                                fontFamily = JetBrainsMonoFontFamily,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
                     }
                 }
             }
@@ -1051,13 +1596,14 @@ private fun HexBinaryStudioPane(
                     if (offsetLong != null && patchValueHex.isNotBlank()) {
                         onPatchByte(offsetLong, patchValueHex)
                     }
-                }
+                },
+                modifier = Modifier.testTag("patch_hex_byte_btn")
             ) {
                 Text("Patch Byte")
             }
         }
 
-        // Hex & ASCII Grid
+        // Hex Rows Table
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -1075,18 +1621,20 @@ private fun HexBinaryStudioPane(
                     Text(
                         text = row.offsetHex,
                         fontFamily = JetBrainsMonoFontFamily,
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.primary
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.Bold
                     )
                     Text(
                         text = row.byteValuesHex.joinToString(" "),
                         fontFamily = JetBrainsMonoFontFamily,
-                        fontSize = 11.sp
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     Text(
                         text = "| ${row.asciiPreview}",
                         fontFamily = JetBrainsMonoFontFamily,
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.secondary
                     )
                 }

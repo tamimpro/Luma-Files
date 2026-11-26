@@ -12,10 +12,14 @@ enum class LumaTab {
 
 enum class FileFormatCategory(val label: String, val badgeText: String) {
     DIRECTORY("Directory", "DIR"),
-    TEXT_CODE("Text & Code", "CODE"),
+    TEXT_CODE("Text & Source Code", "CODE"),
+    STRUCTURED_DATA("JSON / XML / YAML", "DATA"),
     MARKDOWN("Markdown Document", "MD"),
     PDF("PDF Document", "PDF"),
     DOCX("Word OOXML Document", "DOCX"),
+    CSV_TSV("Spreadsheet Grid", "CSV"),
+    SQLITE_DB("SQLite Database", "SQL"),
+    APK_PACKAGE("Android APK Package", "APK"),
     ARCHIVE_ZIP("ZIP / Archive", "ZIP"),
     VIDEO("Lossless Video", "VID"),
     AUDIO("Lossless Audio", "AUD"),
@@ -32,6 +36,26 @@ enum class SortOption(val label: String) {
     TYPE("Format Type")
 }
 
+enum class ConflictPolicy(val label: String) {
+    KEEP_BOTH("Keep Both (Auto-Rename)"),
+    OVERWRITE("Overwrite Existing"),
+    SKIP("Skip Conflicts")
+}
+
+enum class VaultAuthMode(val label: String, val minLength: Int) {
+    PIN_4("4-Digit PIN", 4),
+    PIN_6("6-Digit PIN", 6),
+    ALPHANUMERIC_PASSWORD("Alphanumeric Password", 6)
+}
+
+data class ClipboardState(
+    val sourceNodes: List<FileNode> = emptyList(),
+    val isMoveOperation: Boolean = false,
+    val conflictPolicy: ConflictPolicy = ConflictPolicy.KEEP_BOTH
+) {
+    val isActive: Boolean get() = sourceNodes.isNotEmpty()
+}
+
 data class FileNode(
     val name: String,
     val path: String,
@@ -45,7 +69,8 @@ data class FileNode(
     val isHidden: Boolean,
     val childCount: Int = 0,
     val isSafDocument: Boolean = false,
-    val safUriString: String? = null
+    val safUriString: String? = null,
+    val safTreeRootUriString: String? = null
 )
 
 data class StorageVolumeRoot(
@@ -55,6 +80,7 @@ data class StorageVolumeRoot(
     val totalBytes: Long,
     val freeBytes: Long,
     val isSafTree: Boolean = false,
+    val isRemovableSd: Boolean = false,
     val requiresAllFilesPermission: Boolean = false
 )
 
@@ -100,6 +126,13 @@ data class StorageAnalyzerReport(
     val reclaimableDuplicateBytes: Long
 )
 
+data class DocxParagraphNode(
+    val index: Int,
+    val styleId: String,
+    val text: String,
+    val hasRunFormatting: Boolean = false
+)
+
 sealed class StudioContent {
     data class TextCodeEditor(
         val file: FileNode,
@@ -107,15 +140,50 @@ sealed class StudioContent {
         val encoding: String = "UTF-8",
         val lineCount: Int,
         val isMarkdown: Boolean,
+        val isStructuredData: Boolean = false,
+        val validationMessage: String? = null,
         val isTruncatedPreview: Boolean = false,
         val totalFileBytes: Long
     ) : StudioContent()
 
     data class DocxEditor(
         val file: FileNode,
-        val paragraphs: List<String>,
+        val paragraphNodes: List<DocxParagraphNode>,
         val xmlEntriesCount: Int,
-        val embeddedMediaCount: Int
+        val embeddedMediaCount: Int,
+        val preservedStylesCount: Int
+    ) : StudioContent()
+
+    data class CsvGridStudio(
+        val file: FileNode,
+        val delimiter: Char,
+        val headers: List<String>,
+        val rows: List<List<String>>
+    ) : StudioContent()
+
+    data class SqliteStudio(
+        val file: FileNode,
+        val tableNames: List<String>,
+        val selectedTable: String,
+        val columns: List<String>,
+        val rows: List<List<String>>,
+        val totalRowsInTable: Int,
+        val customQueryResultMessage: String? = null
+    ) : StudioContent()
+
+    data class ApkInspectorStudio(
+        val file: FileNode,
+        val packageName: String,
+        val versionName: String,
+        val versionCode: Long,
+        val minSdk: Int,
+        val targetSdk: Int,
+        val permissions: List<String>,
+        val activities: List<String>,
+        val nativeLibraries: List<String>,
+        val dexFilesCount: Int,
+        val totalEntriesCount: Int,
+        val sha256Signature: String
     ) : StudioContent()
 
     data class PdfViewer(

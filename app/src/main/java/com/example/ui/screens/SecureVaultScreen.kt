@@ -3,6 +3,7 @@ package com.example.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,13 +18,14 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Backspace
 import androidx.compose.material.icons.filled.EnhancedEncryption
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Restore
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.VerifiedUser
@@ -41,7 +43,6 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -50,9 +51,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.data.local.VaultItemEntity
+import com.example.domain.model.VaultAuthMode
 import com.example.ui.ExplorerUiState
 import com.example.ui.LumaFormatUtils
 import com.example.ui.theme.EmeraldVault
@@ -62,29 +65,31 @@ import com.example.ui.theme.JetBrainsMonoFontFamily
 fun SecureVaultScreen(
     state: ExplorerUiState,
     vaultItems: List<VaultItemEntity>,
-    onSetupPin: (pin: String, pinLength: Int, recoveryQ: String, recoveryA: String) -> Unit,
-    onUnlockPin: (pin: String) -> Unit,
+    onSetupCredential: (secret: String, mode: VaultAuthMode, recoveryQ: String, recoveryA: String) -> Unit,
+    onUnlockVault: (secret: String) -> Unit,
     onLockVault: () -> Unit,
-    onResetPinWithRecovery: (answer: String, newPin: String, newLength: Int) -> Unit,
+    onResetWithRecovery: (answer: String, newSecret: String, newMode: VaultAuthMode) -> Unit,
     onRestoreVaultItem: (VaultItemEntity) -> Unit,
     onGoToExplorerToLockFiles: () -> Unit
 ) {
     if (!state.isPinConfigured) {
-        VaultPinSetupPane(
+        VaultCredentialSetupPane(
             authError = state.vaultAuthError,
-            onSetupPin = onSetupPin
+            onSetupCredential = onSetupCredential
         )
     } else if (!state.isVaultUnlocked) {
-        VaultPinUnlockKeypadPane(
+        VaultUnlockPane(
+            authMode = state.vaultAuthMode,
             pinLength = state.configuredPinLength,
             recoveryQuestion = state.recoveryQuestion,
             authError = state.vaultAuthError,
-            onUnlockPin = onUnlockPin,
-            onResetWithRecovery = onResetPinWithRecovery
+            onUnlock = onUnlockVault,
+            onResetWithRecovery = onResetWithRecovery
         )
     } else {
         UnlockedVaultDashboardPane(
             vaultItems = vaultItems,
+            authMode = state.vaultAuthMode,
             onLockVault = onLockVault,
             onRestoreItem = onRestoreVaultItem,
             onGoToExplorer = onGoToExplorerToLockFiles
@@ -93,27 +98,39 @@ fun SecureVaultScreen(
 }
 
 @Composable
-private fun VaultPinSetupPane(
+private fun VaultCredentialSetupPane(
     authError: String?,
-    onSetupPin: (String, Int, String, String) -> Unit
+    onSetupCredential: (String, VaultAuthMode, String, String) -> Unit
 ) {
-    var selectedPinLength by remember { mutableIntStateOf(4) }
-    var enteredPin by remember { mutableStateOf("") }
+    var selectedMode by remember { mutableStateOf(VaultAuthMode.PIN_4) }
+    var enteredSecret by remember { mutableStateOf("") }
     var recoveryQuestion by remember { mutableStateOf("What is your favorite security keyword?") }
     var recoveryAnswer by remember { mutableStateOf("LumaVault") }
+
+    val targetPinLength = when (selectedMode) {
+        VaultAuthMode.PIN_4 -> 4
+        VaultAuthMode.PIN_6 -> 6
+        VaultAuthMode.ALPHANUMERIC_PASSWORD -> 0
+    }
+
+    val isCredentialReady = when (selectedMode) {
+        VaultAuthMode.PIN_4 -> enteredSecret.length == 4 && enteredSecret.all { it.isDigit() }
+        VaultAuthMode.PIN_6 -> enteredSecret.length == 6 && enteredSecret.all { it.isDigit() }
+        VaultAuthMode.ALPHANUMERIC_PASSWORD -> enteredSecret.length >= 6
+    }
 
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .testTag("vault_pin_setup_pane"),
         contentPadding = PaddingValues(20.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         item {
             Box(
                 modifier = Modifier
-                    .size(72.dp)
+                    .size(68.dp)
                     .background(EmeraldVault.copy(alpha = 0.16f), CircleShape),
                 contentAlignment = Alignment.Center
             ) {
@@ -121,46 +138,56 @@ private fun VaultPinSetupPane(
                     imageVector = Icons.Default.EnhancedEncryption,
                     contentDescription = "AES-256 Vault",
                     tint = EmeraldVault,
-                    modifier = Modifier.size(36.dp)
+                    modifier = Modifier.size(34.dp)
                 )
             }
         }
 
         item {
             Text(
-                text = "Initialize AES-256 PIN Secure Folder",
-                style = MaterialTheme.typography.headlineMedium,
+                text = "Initialize Isolated AES-256 Safe Folder",
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
                 textAlign = TextAlign.Center
             )
+            Spacer(modifier = Modifier.height(6.dp))
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                shape = RoundedCornerShape(10.dp)
+            ) {
+                Text(
+                    text = "210,000 PBKDF2-HMAC-SHA256 • Isolated noBackupFilesDir • Opaque UUID (.lvault) • Zero-Overwrite Shredding",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Files locked in the Secure Vault are encrypted on disk with AES-256-GCM using a key derived from your PIN via PBKDF2-HMAC-SHA256.",
-                style = MaterialTheme.typography.bodyMedium,
+                text = "Locked files are moved into app-private non-backed-up storage with randomized UUID names and zero-shredded from public folders so no external file manager can view or recover them.",
+                style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
             )
         }
 
         item {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                FilterChip(
-                    selected = selectedPinLength == 4,
-                    onClick = {
-                        selectedPinLength = 4
-                        if (enteredPin.length > 4) enteredPin = enteredPin.take(4)
-                    },
-                    label = { Text("4-Digit PIN") }
-                )
-                FilterChip(
-                    selected = selectedPinLength == 6,
-                    onClick = { selectedPinLength = 6 },
-                    label = { Text("6-Digit High-Entropy PIN") }
-                )
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                VaultAuthMode.entries.forEach { mode ->
+                    FilterChip(
+                        selected = selectedMode == mode,
+                        onClick = {
+                            selectedMode = mode
+                            enteredSecret = ""
+                        },
+                        label = { Text(mode.label) }
+                    )
+                }
             }
-        }
-
-        item {
-            PinDotsIndicator(enteredLength = enteredPin.length, totalLength = selectedPinLength)
         }
 
         if (authError != null) {
@@ -168,24 +195,44 @@ private fun VaultPinSetupPane(
                 Text(
                     text = authError,
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center
                 )
             }
         }
 
-        item {
-            NumericPinPad(
-                onDigitTap = { digit ->
-                    if (enteredPin.length < selectedPinLength) {
-                        enteredPin += digit
+        if (selectedMode == VaultAuthMode.ALPHANUMERIC_PASSWORD) {
+            item {
+                OutlinedTextField(
+                    value = enteredSecret,
+                    onValueChange = { enteredSecret = it },
+                    label = { Text("Alphanumeric Master Password (6+ chars)") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Default.Key, contentDescription = null) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("vault_password_setup_input")
+                )
+            }
+        } else {
+            item {
+                PinDotsIndicator(enteredLength = enteredSecret.length, totalLength = targetPinLength)
+            }
+            item {
+                NumericPinPad(
+                    onDigitTap = { digit ->
+                        if (enteredSecret.length < targetPinLength) {
+                            enteredSecret += digit
+                        }
+                    },
+                    onBackspace = {
+                        if (enteredSecret.isNotEmpty()) {
+                            enteredSecret = enteredSecret.dropLast(1)
+                        }
                     }
-                },
-                onBackspace = {
-                    if (enteredPin.isNotEmpty()) {
-                        enteredPin = enteredPin.dropLast(1)
-                    }
-                }
-            )
+                )
+            }
         }
 
         item {
@@ -198,7 +245,7 @@ private fun VaultPinSetupPane(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "PIN Recovery Security Question",
+                        text = "Credential Recovery Security Question",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -223,9 +270,9 @@ private fun VaultPinSetupPane(
         item {
             Button(
                 onClick = {
-                    onSetupPin(enteredPin, selectedPinLength, recoveryQuestion, recoveryAnswer)
+                    onSetupCredential(enteredSecret, selectedMode, recoveryQuestion, recoveryAnswer)
                 },
-                enabled = enteredPin.length == selectedPinLength,
+                enabled = isCredentialReady,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(52.dp)
@@ -233,24 +280,26 @@ private fun VaultPinSetupPane(
             ) {
                 Icon(Icons.Default.Lock, contentDescription = null)
                 Spacer(modifier = Modifier.width(8.dp))
-                Text("Activate $selectedPinLength-Digit AES-256 Vault")
+                Text("Activate AES-256 Safe Vault (${selectedMode.label})")
             }
         }
     }
 }
 
 @Composable
-private fun VaultPinUnlockKeypadPane(
+private fun VaultUnlockPane(
+    authMode: VaultAuthMode,
     pinLength: Int,
     recoveryQuestion: String,
     authError: String?,
-    onUnlockPin: (String) -> Unit,
-    onResetWithRecovery: (String, String, Int) -> Unit
+    onUnlock: (String) -> Unit,
+    onResetWithRecovery: (String, String, VaultAuthMode) -> Unit
 ) {
-    var enteredPin by remember { mutableStateOf("") }
+    var enteredSecret by remember { mutableStateOf("") }
     var showRecoveryForm by remember { mutableStateOf(false) }
     var recoveryAnswer by remember { mutableStateOf("") }
-    var newPin by remember { mutableStateOf("") }
+    var newSecret by remember { mutableStateOf("") }
+    var recoveryMode by remember { mutableStateOf(authMode) }
 
     Column(
         modifier = Modifier
@@ -266,19 +315,21 @@ private fun VaultPinUnlockKeypadPane(
             tint = MaterialTheme.colorScheme.primary,
             modifier = Modifier.size(52.dp)
         )
-        Spacer(modifier = Modifier.height(12.dp))
+        Spacer(modifier = Modifier.height(10.dp))
         Text(
-            text = "Enter $pinLength-Digit Secure Folder PIN",
-            style = MaterialTheme.typography.headlineMedium
+            text = if (authMode == VaultAuthMode.ALPHANUMERIC_PASSWORD) {
+                "Enter Master Password"
+            } else {
+                "Enter $pinLength-Digit Safe Folder PIN"
+            },
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold
         )
         Text(
-            text = "AES-256-GCM Encrypted Vault is currently locked",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+            text = "210,000-Iteration PBKDF2 • Isolated .lvault Storage",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary
         )
-
-        Spacer(modifier = Modifier.height(20.dp))
-        PinDotsIndicator(enteredLength = enteredPin.length, totalLength = pinLength)
 
         if (authError != null) {
             Spacer(modifier = Modifier.height(10.dp))
@@ -290,28 +341,56 @@ private fun VaultPinUnlockKeypadPane(
             )
         }
 
-        Spacer(modifier = Modifier.height(20.dp))
+        Spacer(modifier = Modifier.height(18.dp))
 
         if (!showRecoveryForm) {
-            NumericPinPad(
-                onDigitTap = { digit ->
-                    if (enteredPin.length < pinLength) {
-                        enteredPin += digit
-                        if (enteredPin.length == pinLength) {
-                            onUnlockPin(enteredPin)
-                            enteredPin = ""
+            if (authMode == VaultAuthMode.ALPHANUMERIC_PASSWORD) {
+                OutlinedTextField(
+                    value = enteredSecret,
+                    onValueChange = { enteredSecret = it },
+                    label = { Text("Master Password") },
+                    visualTransformation = PasswordVisualTransformation(),
+                    singleLine = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("vault_password_unlock_input")
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Button(
+                    onClick = {
+                        onUnlock(enteredSecret)
+                        enteredSecret = ""
+                    },
+                    enabled = enteredSecret.isNotBlank(),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("vault_password_unlock_btn")
+                ) {
+                    Text("Unlock AES-256 Safe Vault")
+                }
+            } else {
+                PinDotsIndicator(enteredLength = enteredSecret.length, totalLength = pinLength)
+                Spacer(modifier = Modifier.height(18.dp))
+                NumericPinPad(
+                    onDigitTap = { digit ->
+                        if (enteredSecret.length < pinLength) {
+                            enteredSecret += digit
+                            if (enteredSecret.length == pinLength) {
+                                onUnlock(enteredSecret)
+                                enteredSecret = ""
+                            }
+                        }
+                    },
+                    onBackspace = {
+                        if (enteredSecret.isNotEmpty()) {
+                            enteredSecret = enteredSecret.dropLast(1)
                         }
                     }
-                },
-                onBackspace = {
-                    if (enteredPin.isNotEmpty()) {
-                        enteredPin = enteredPin.dropLast(1)
-                    }
-                }
-            )
+                )
+            }
             Spacer(modifier = Modifier.height(12.dp))
             TextButton(onClick = { showRecoveryForm = true }) {
-                Text("Forgot PIN? Use Recovery Security Answer")
+                Text("Forgot Credential? Use Recovery Security Answer")
             }
         } else {
             Card(
@@ -334,10 +413,25 @@ private fun VaultPinUnlockKeypadPane(
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    Row(
+                        modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        VaultAuthMode.entries.forEach { mode ->
+                            FilterChip(
+                                selected = recoveryMode == mode,
+                                onClick = {
+                                    recoveryMode = mode
+                                    newSecret = ""
+                                },
+                                label = { Text(mode.label) }
+                            )
+                        }
+                    }
                     OutlinedTextField(
-                        value = newPin,
-                        onValueChange = { if (it.length <= 6 && it.all { c -> c.isDigit() }) newPin = it },
-                        label = { Text("New 4-Digit PIN") },
+                        value = newSecret,
+                        onValueChange = { newSecret = it },
+                        label = { Text("New ${recoveryMode.label}") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -346,12 +440,12 @@ private fun VaultPinUnlockKeypadPane(
                         horizontalArrangement = Arrangement.End
                     ) {
                         TextButton(onClick = { showRecoveryForm = false }) {
-                            Text("Back to Keypad")
+                            Text("Cancel")
                         }
                         Button(
                             onClick = {
-                                if (newPin.length == 4 || newPin.length == 6) {
-                                    onResetWithRecovery(recoveryAnswer, newPin, newPin.length)
+                                if (newSecret.isNotBlank()) {
+                                    onResetWithRecovery(recoveryAnswer, newSecret, recoveryMode)
                                 }
                             }
                         ) {
@@ -367,6 +461,7 @@ private fun VaultPinUnlockKeypadPane(
 @Composable
 private fun UnlockedVaultDashboardPane(
     vaultItems: List<VaultItemEntity>,
+    authMode: VaultAuthMode,
     onLockVault: () -> Unit,
     onRestoreItem: (VaultItemEntity) -> Unit,
     onGoToExplorer: () -> Unit
@@ -406,13 +501,13 @@ private fun UnlockedVaultDashboardPane(
                         Spacer(modifier = Modifier.width(12.dp))
                         Column {
                             Text(
-                                text = "AES-256-GCM Secure Vault Unlocked",
+                                text = "AES-256-GCM Safe Vault Unlocked",
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "${vaultItems.size} Encrypted Files • 100% Bit-Exact SHA-256 Integrity",
+                                text = "${vaultItems.size} Opaque .lvault Files • ${authMode.label} • 210k PBKDF2 • Hidden from Other Apps",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
                             )
@@ -454,23 +549,24 @@ private fun UnlockedVaultDashboardPane(
                             modifier = Modifier.size(48.dp)
                         )
                         Text(
-                            text = "No Files Locked in Vault Yet",
+                            text = "No Files Locked in Safe Folder Yet",
                             style = MaterialTheme.typography.titleMedium
                         )
                         Text(
-                            text = "In Explorer, tap any file (or its 3-dot menu) and choose 'Encrypt into PIN Secure Vault (AES-256)' to protect it.",
+                            text = "In Explorer, select one or more files and tap 'Vault' (or use the 3-dot menu) to encrypt them into opaque .lvault containers and zero-shred the original files.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             textAlign = TextAlign.Center
                         )
                         OutlinedButton(onClick = onGoToExplorer) {
-                            Text("Browse Files to Encrypt")
+                            Text("Browse Files to Lock")
                         }
                     }
                 }
             }
         } else {
             items(vaultItems, key = { it.id }) { item ->
+                val opaqueVaultFileName = item.encryptedFilePath.substringAfterLast('/')
                 Card(
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
                     modifier = Modifier.fillMaxWidth()
@@ -491,7 +587,7 @@ private fun UnlockedVaultDashboardPane(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "Original Size: ${LumaFormatUtils.formatBytes(item.originalSizeBytes)} • Locked ${LumaFormatUtils.formatTimestamp(item.lockedAt)}",
+                                    text = "Size: ${LumaFormatUtils.formatBytes(item.originalSizeBytes)} • Locked ${LumaFormatUtils.formatTimestamp(item.lockedAt)}",
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -513,13 +609,19 @@ private fun UnlockedVaultDashboardPane(
                         ) {
                             Column(modifier = Modifier.padding(8.dp)) {
                                 Text(
-                                    text = "AES-256-GCM IV: ${item.ivHex} • SHA-256: ${item.sha256Checksum.take(28)}...",
+                                    text = "Opaque Container: $opaqueVaultFileName (noBackupFilesDir)",
                                     fontFamily = JetBrainsMonoFontFamily,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = EmeraldVault
                                 )
                                 Text(
-                                    text = "Origin Path: ${item.originalPath}",
+                                    text = "IV: ${item.ivHex} • SHA-256: ${item.sha256Checksum.take(24)}...",
+                                    fontFamily = JetBrainsMonoFontFamily,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "Shredded Source: ${item.originalPath}",
                                     fontFamily = JetBrainsMonoFontFamily,
                                     style = MaterialTheme.typography.labelSmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant

@@ -1,6 +1,8 @@
 package com.example.domain.engine
 
 import android.content.Context
+import android.content.pm.PackageManager
+import android.database.sqlite.SQLiteDatabase
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.pdf.PdfRenderer
@@ -12,7 +14,9 @@ import android.os.ParcelFileDescriptor
 import android.os.StatFs
 import android.provider.DocumentsContract
 import android.webkit.MimeTypeMap
+import com.example.domain.model.ConflictPolicy
 import com.example.domain.model.DiagnosticError
+import com.example.domain.model.DocxParagraphNode
 import com.example.domain.model.DuplicateGroup
 import com.example.domain.model.FileFormatCategory
 import com.example.domain.model.FileNode
@@ -24,12 +28,23 @@ import com.example.domain.model.StudioContent
 import com.example.domain.model.ZipEntryInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import org.w3c.dom.Document
+import org.w3c.dom.Element
+import org.w3c.dom.Node
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.io.RandomAccessFile
+import java.io.StringReader
+import java.io.StringWriter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.Charset
@@ -38,95 +53,152 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
+import javax.xml.parsers.DocumentBuilderFactory
+import javax.xml.transform.OutputKeys
+import javax.xml.transform.TransformerFactory
+import javax.xml.transform.dom.DOMSource
+import javax.xml.transform.stream.StreamResult
+import javax.xml.transform.stream.StreamSource
 
 class FileSystemAndFormatEngine(
-    private val context: Context,
-    private val cryptoEngine: CryptoVaultEngine
+    private val context: Context?,
+    private val cryptoEngine: CryptoVaultEngine,
+    customWorkspaceDir: File? = null
 ) {
 
-    val lumaWorkspaceDir: File = File(context.filesDir, "Luma_Workspace").apply {
+    val lumaWorkspaceDir: File = (customWorkspaceDir ?: File(
+        context?.filesDir ?: File(System.getProperty("java.io.tmpdir")),
+        "Luma_Workspace"
+    )).apply {
         WorkspaceSeedEngine.ensureSeeded(this)
     }
 
     fun hasAllFilesAccessPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            Environment.isExternalStorageManager()
-        } else {
-            Environment.getExternalStorageDirectory().canRead()
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Environment.isExternalStorageManager()
+            } else {
+                Environment.getExternalStorageDirectory().canRead()
+            }
+        } catch (_: Exception) {
+            false
         }
+    }
+
+    /**
+     * Returns Internal Shared Storage (/storage/emulated/0) as the default path when accessible,
+     * or falls back to Internal Shared Storage path / Luma Workspace so the user starts in
+     * Internal Storage by default.
+     */
+    fun getDefaultStartPath(): String {
+        val extRoot = runCatching { Environment.getExternalStorageDirectory() }.getOrNull()
+        return if (extRoot != null && extRoot.exists() && (hasAllFilesAccessPermission() || extRoot.canRead()) && extRoot.listFiles() != null) {
+            extRoot.absolutePath
+        } else {
+            lumaWorkspaceDir.absolutePath
+        }
+    }
+
+    fun getPrimaryInternalStoragePath(): String {
+        return runCatching { Environment.getExternalStorageDirectory().absolutePath }
+            .getOrDefault(lumaWorkspaceDir.absolutePath)
     }
 
     fun getAvailableStorageRoots(): List<StorageVolumeRoot> {
         val roots = mutableListOf<StorageVolumeRoot>()
 
-        // 1. Luma Workspace (Always 100% accessible with multi-format studio samples)
-        val internalStat = runCatching { StatFs(context.filesDir.absolutePath) }.getOrNull()
-        val internalTotal = internalStat?.totalBytes ?: (64L * 1024 * 1024 * 1024)
-        val internalFree = internalStat?.availableBytes ?: (32L * 1024 * 1024 * 1024)
-        roots.add(
-            StorageVolumeRoot(
-                title = "Luma Studio Workspace",
-                subtitle = "App-Managed High-Speed Storage (Full Read/Write)",
-                path = lumaWorkspaceDir.absolutePath,
-                totalBytes = internalTotal,
-                freeBytes = internalFree,
-                isSafTree = false,
-                requiresAllFilesPermission = false
-            )
-        )
+        val internalStat = runCatching {
+            StatFs((context?.filesDir ?: lumaWorkspaceDir).absolutePath)
+        }.getOrNull()
+        val fallbackTotal = internalStat?.totalBytes ?: (64L * 1024 * 1024 * 1024)
+        val fallbackFree = internalStat?.availableBytes ?: (32L * 1024 * 1024 * 1024)
 
-        // 2. Primary Shared Device Storage (/storage/emulated/0)
-        val extRoot = Environment.getExternalStorageDirectory()
-        val extStat = runCatching { StatFs(extRoot.absolutePath) }.getOrNull()
-        val extTotal = extStat?.totalBytes ?: internalTotal
-        val extFree = extStat?.availableBytes ?: internalFree
-        val hasAllAccess = hasAllFilesAccessPermission()
+        // 1. Primary Internal Shared Storage (/storage/emulated/0) — Default #1 Root
+        val extRoot = runCatching { Environment.getExternalStorageDirectory() }.getOrNull()
+        if (extRoot != null) {
+            val extStat = runCatching { StatFs(extRoot.absolutePath) }.getOrNull()
+            val extTotal = extStat?.totalBytes ?: fallbackTotal
+            val extFree = extStat?.availableBytes ?: fallbackFree
+            val canListDirectly = hasAllFilesAccessPermission() || (extRoot.canRead() && extRoot.listFiles() != null)
 
-        roots.add(
-            StorageVolumeRoot(
-                title = "Internal Shared Storage",
-                subtitle = if (hasAllAccess) "${extRoot.absolutePath} (All Files Access Active)" else "${extRoot.absolutePath} (Tap to Grant Full Access)",
-                path = extRoot.absolutePath,
-                totalBytes = extTotal,
-                freeBytes = extFree,
-                isSafTree = false,
-                requiresAllFilesPermission = !hasAllAccess
-            )
-        )
-
-        // 3. App External Media/Documents Sandbox
-        context.getExternalFilesDir(null)?.let { extAppDir ->
-            if (!extAppDir.exists()) extAppDir.mkdirs()
             roots.add(
                 StorageVolumeRoot(
-                    title = "External App Sandbox",
-                    subtitle = extAppDir.absolutePath,
-                    path = extAppDir.absolutePath,
+                    title = "Internal Storage",
+                    subtitle = if (canListDirectly) {
+                        "${extRoot.absolutePath} • Full Access"
+                    } else {
+                        "${extRoot.absolutePath} • Tap to Enable All Files Access"
+                    },
+                    path = extRoot.absolutePath,
                     totalBytes = extTotal,
                     freeBytes = extFree,
                     isSafTree = false,
-                    requiresAllFilesPermission = false
+                    isRemovableSd = false,
+                    requiresAllFilesPermission = !canListDirectly
                 )
             )
         }
 
-        // 4. Persisted SAF Document Trees
-        context.contentResolver.persistedUriPermissions.forEach { perm ->
+        // 2. Removable SD Cards & Secondary External Storage Volumes
+        context?.getExternalFilesDirs(null)?.forEachIndexed { index, dir ->
+            if (dir != null) {
+                if (!dir.exists()) dir.mkdirs()
+                val volStat = runCatching { StatFs(dir.absolutePath) }.getOrNull()
+                val vTotal = volStat?.totalBytes ?: fallbackTotal
+                val vFree = volStat?.availableBytes ?: fallbackFree
+                if (index > 0) {
+                    // Removable SD Card detected!
+                    val sdRoot = dir.absolutePath.substringBefore("/Android/data").let { File(it) }
+                    val targetSdDir = if (sdRoot.exists() && sdRoot.canRead() && sdRoot.listFiles() != null) sdRoot else dir
+                    roots.add(
+                        StorageVolumeRoot(
+                            title = "SD Card Volume #$index",
+                            subtitle = targetSdDir.absolutePath,
+                            path = targetSdDir.absolutePath,
+                            totalBytes = vTotal,
+                            freeBytes = vFree,
+                            isSafTree = false,
+                            isRemovableSd = true,
+                            requiresAllFilesPermission = false
+                        )
+                    )
+                }
+            }
+        }
+
+        // 3. Persisted SAF Document Trees (External Folders / USB OTG / SD Cards)
+        context?.contentResolver?.persistedUriPermissions?.forEach { perm ->
             if (perm.isReadPermission) {
-                val docId = runCatching { DocumentsContract.getTreeDocumentId(perm.uri) }.getOrDefault(perm.uri.lastPathSegment ?: "SAF Tree")
+                val docId = runCatching { DocumentsContract.getTreeDocumentId(perm.uri) }
+                    .getOrDefault(perm.uri.lastPathSegment ?: "SAF Mount")
                 roots.add(
                     StorageVolumeRoot(
-                        title = "SAF Mounted Folder ($docId)",
+                        title = "SAF Mount ($docId)",
                         subtitle = perm.uri.toString(),
                         path = perm.uri.toString(),
-                        totalBytes = extTotal,
-                        freeBytes = extFree,
+                        totalBytes = fallbackTotal,
+                        freeBytes = fallbackFree,
                         isSafTree = true,
+                        isRemovableSd = docId.contains("primary", ignoreCase = true).not(),
                         requiresAllFilesPermission = false
                     )
                 )
             }
         }
+
+        // 4. Luma Studio Sample Workspace (Pre-populated with DOCX, SQLite, CSV, PDF, ZIP, WAV, Code)
+        roots.add(
+            StorageVolumeRoot(
+                title = "Luma Sample Studio",
+                subtitle = "Pre-loaded DOCX, SQLite, CSV, PDF, ZIP & Media Samples",
+                path = lumaWorkspaceDir.absolutePath,
+                totalBytes = fallbackTotal,
+                freeBytes = fallbackFree,
+                isSafTree = false,
+                isRemovableSd = false,
+                requiresAllFilesPermission = false
+            )
+        )
 
         return roots
     }
@@ -158,8 +230,7 @@ class FileSystemAndFormatEngine(
                 rawNodes.filter { it.name.contains(searchQuery, ignoreCase = true) }
             }
 
-            val sorted = sortNodes(filtered, sortOption)
-            Result.success(sorted)
+            Result.success(sortNodes(filtered, sortOption))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -171,7 +242,7 @@ class FileSystemAndFormatEngine(
         }
         val children = dir.listFiles()
             ?: throw IllegalStateException(
-                "POSIX EACCES (Permission Denied): Unable to list '${dir.absolutePath}'. Grant 'All Files Access' or mount this folder via SAF."
+                "POSIX EACCES (Permission Denied): Unable to list '${dir.absolutePath}'. Tap 'Internal Storage' or 'Grant All Files Access' to allow full non-root device storage access."
             )
 
         return children
@@ -179,9 +250,16 @@ class FileSystemAndFormatEngine(
             .map { it.toFileNode() }
     }
 
-    private fun listSafTreeDirectory(treeUri: Uri, showHidden: Boolean): List<FileNode> {
-        val docId = DocumentsContract.getTreeDocumentId(treeUri)
-        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+    private fun listSafTreeDirectory(uri: Uri, showHidden: Boolean): List<FileNode> {
+        val resolver = context?.contentResolver
+            ?: throw IllegalStateException("ContentResolver unavailable for SAF URI $uri")
+        val isDocumentUri = DocumentsContract.isDocumentUri(context, uri)
+        val parentDocId = if (isDocumentUri) {
+            DocumentsContract.getDocumentId(uri)
+        } else {
+            DocumentsContract.getTreeDocumentId(uri)
+        }
+        val childrenUri = DocumentsContract.buildChildDocumentsUriUsingTree(uri, parentDocId)
         val projection = arrayOf(
             DocumentsContract.Document.COLUMN_DOCUMENT_ID,
             DocumentsContract.Document.COLUMN_DISPLAY_NAME,
@@ -190,7 +268,7 @@ class FileSystemAndFormatEngine(
             DocumentsContract.Document.COLUMN_LAST_MODIFIED
         )
         val results = mutableListOf<FileNode>()
-        context.contentResolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
+        resolver.query(childrenUri, projection, null, null, null)?.use { cursor ->
             val idCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
             val nameCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
             val mimeCol = cursor.getColumnIndexOrThrow(DocumentsContract.Document.COLUMN_MIME_TYPE)
@@ -206,7 +284,7 @@ class FileSystemAndFormatEngine(
                 val isDir = mime == DocumentsContract.Document.MIME_TYPE_DIR
                 val size = if (cursor.isNull(sizeCol)) 0L else cursor.getLong(sizeCol)
                 val lastMod = if (cursor.isNull(modCol)) System.currentTimeMillis() else cursor.getLong(modCol)
-                val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childId)
+                val docUri = DocumentsContract.buildDocumentUriUsingTree(uri, childId)
                 val ext = name.substringAfterLast('.', "").lowercase()
 
                 results.add(
@@ -223,7 +301,8 @@ class FileSystemAndFormatEngine(
                         isHidden = isHidden,
                         childCount = 0,
                         isSafDocument = true,
-                        safUriString = docUri.toString()
+                        safUriString = docUri.toString(),
+                        safTreeRootUriString = uri.toString()
                     )
                 )
             }
@@ -260,15 +339,23 @@ class FileSystemAndFormatEngine(
 
     fun detectMimeType(ext: String): String {
         if (ext.isEmpty()) return "application/octet-stream"
-        val webkitMime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+        val webkitMime = runCatching {
+            MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+        }.getOrNull()
         if (!webkitMime.isNullOrBlank()) return webkitMime
         return when (ext) {
             "md", "markdown" -> "text/markdown"
-            "kt", "kts", "java", "py", "js", "ts", "c", "cpp", "h", "sh", "properties", "toml", "yaml", "yml", "gradle", "log", "ini" -> "text/plain"
+            "csv" -> "text/csv"
+            "tsv" -> "text/tab-separated-values"
             "json" -> "application/json"
+            "xml" -> "application/xml"
+            "yaml", "yml" -> "application/x-yaml"
+            "db", "sqlite", "sqlite3" -> "application/vnd.sqlite3"
+            "apk" -> "application/vnd.android.package-archive"
+            "kt", "kts", "java", "py", "js", "ts", "c", "cpp", "h", "sh", "properties", "toml", "gradle", "log", "ini", "sql", "html", "css" -> "text/plain"
             "docx" -> "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             "pdf" -> "application/pdf"
-            "zip", "jar", "apk" -> "application/zip"
+            "zip", "jar" -> "application/zip"
             else -> "application/octet-stream"
         }
     }
@@ -276,14 +363,18 @@ class FileSystemAndFormatEngine(
     fun detectCategory(ext: String, mime: String): FileFormatCategory {
         return when {
             ext in setOf("md", "markdown") -> FileFormatCategory.MARKDOWN
+            ext in setOf("csv", "tsv") || mime == "text/csv" -> FileFormatCategory.CSV_TSV
+            ext in setOf("db", "sqlite", "sqlite3") || mime.contains("sqlite") -> FileFormatCategory.SQLITE_DB
+            ext == "apk" || mime == "application/vnd.android.package-archive" -> FileFormatCategory.APK_PACKAGE
+            ext in setOf("json", "xml", "yaml", "yml") -> FileFormatCategory.STRUCTURED_DATA
             ext in setOf(
-                "txt", "log", "json", "xml", "html", "htm", "css", "csv",
+                "txt", "log", "html", "htm", "css",
                 "kt", "kts", "java", "py", "js", "ts", "c", "cpp", "h",
-                "sh", "yaml", "yml", "toml", "ini", "properties", "gradle", "sql"
+                "sh", "toml", "ini", "properties", "gradle", "sql"
             ) || mime.startsWith("text/") -> FileFormatCategory.TEXT_CODE
             ext == "pdf" || mime == "application/pdf" -> FileFormatCategory.PDF
             ext == "docx" || mime.contains("wordprocessingml") -> FileFormatCategory.DOCX
-            ext in setOf("zip", "jar", "apk") || mime.contains("zip") -> FileFormatCategory.ARCHIVE_ZIP
+            ext in setOf("zip", "jar") || mime.contains("zip") -> FileFormatCategory.ARCHIVE_ZIP
             ext in setOf("mp4", "mkv", "webm", "avi", "mov", "3gp") || mime.startsWith("video/") -> FileFormatCategory.VIDEO
             ext in setOf("mp3", "wav", "flac", "ogg", "m4a", "aac") || mime.startsWith("audio/") -> FileFormatCategory.AUDIO
             ext in setOf("png", "jpg", "jpeg", "webp", "bmp", "gif") || mime.startsWith("image/") -> FileFormatCategory.IMAGE
@@ -309,6 +400,265 @@ class FileSystemAndFormatEngine(
         )
     }
 
+    // ==================== CROSS-VOLUME COPY, MOVE & BATCH OPERATIONS ====================
+
+    /**
+     * Copies or moves a batch of files/folders across Internal Storage, Removable SD Cards,
+     * and Storage Access Framework (SAF) URIs with Conflict Resolution (KEEP_BOTH, OVERWRITE, SKIP).
+     */
+    suspend fun copyOrMoveBatch(
+        sourceNodes: List<FileNode>,
+        destinationDirPathOrUri: String,
+        isMove: Boolean,
+        conflictPolicy: ConflictPolicy
+    ): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            var processedCount = 0
+            val destIsSaf = destinationDirPathOrUri.startsWith("content://")
+
+            for (source in sourceNodes) {
+                if (source.path == destinationDirPathOrUri) continue
+                if (!source.isSafDocument && !destIsSaf && File(source.path).parentFile?.absolutePath == File(destinationDirPathOrUri).absolutePath && isMove) {
+                    continue
+                }
+                val copied = if (destIsSaf) {
+                    copyNodeToSafDirectory(source, Uri.parse(destinationDirPathOrUri), conflictPolicy)
+                } else {
+                    copyNodeToFileDirectory(source, File(destinationDirPathOrUri), conflictPolicy)
+                }
+                if (copied) {
+                    processedCount++
+                    if (isMove) {
+                        deleteFileOrDirectory(source)
+                    }
+                }
+            }
+            Result.success(processedCount)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun copyNodeToFileDirectory(
+        source: FileNode,
+        destDir: File,
+        conflictPolicy: ConflictPolicy
+    ): Boolean {
+        if (!destDir.exists()) destDir.mkdirs()
+        var targetFile = File(destDir, source.name)
+
+        if (targetFile.exists()) {
+            when (conflictPolicy) {
+                ConflictPolicy.SKIP -> return false
+                ConflictPolicy.OVERWRITE -> {
+                    if (targetFile.isDirectory) targetFile.deleteRecursively() else targetFile.delete()
+                }
+                ConflictPolicy.KEEP_BOTH -> {
+                    targetFile = resolveUniqueDestinationFile(destDir, source.name, source.isDirectory)
+                }
+            }
+        }
+
+        if (source.isDirectory) {
+            targetFile.mkdirs()
+            if (source.isSafDocument) {
+                val children = listSafTreeDirectory(Uri.parse(source.safUriString ?: source.path), showHidden = true)
+                children.forEach { child ->
+                    copyNodeToFileDirectory(child, targetFile, conflictPolicy)
+                }
+            } else {
+                File(source.path).listFiles()?.forEach { childFile ->
+                    copyNodeToFileDirectory(childFile.toFileNode(), targetFile, conflictPolicy)
+                }
+            }
+            return true
+        } else {
+            openNodeInputStream(source).use { input ->
+                BufferedOutputStream(FileOutputStream(targetFile), 64 * 1024).use { output ->
+                    input.copyTo(output, 64 * 1024)
+                    output.flush()
+                }
+            }
+            return true
+        }
+    }
+
+    private fun copyNodeToSafDirectory(
+        source: FileNode,
+        destTreeOrDocUri: Uri,
+        conflictPolicy: ConflictPolicy
+    ): Boolean {
+        val resolver = context?.contentResolver
+            ?: throw IllegalStateException("ContentResolver required for SAF write operations.")
+        val parentDocUri = if (DocumentsContract.isDocumentUri(context, destTreeOrDocUri)) {
+            destTreeOrDocUri
+        } else {
+            DocumentsContract.buildDocumentUriUsingTree(
+                destTreeOrDocUri,
+                DocumentsContract.getTreeDocumentId(destTreeOrDocUri)
+            )
+        }
+
+        val existingChildren = listSafTreeDirectory(destTreeOrDocUri, showHidden = true)
+        val collision = existingChildren.firstOrNull { it.name.equals(source.name, ignoreCase = true) }
+        var effectiveName = source.name
+
+        if (collision != null) {
+            when (conflictPolicy) {
+                ConflictPolicy.SKIP -> return false
+                ConflictPolicy.OVERWRITE -> {
+                    DocumentsContract.deleteDocument(resolver, Uri.parse(collision.safUriString ?: collision.path))
+                }
+                ConflictPolicy.KEEP_BOTH -> {
+                    val base = source.name.substringBeforeLast('.', source.name)
+                    val ext = source.name.substringAfterLast('.', "")
+                    val suffix = if (ext.isNotEmpty() && !source.isDirectory) ".$ext" else ""
+                    effectiveName = "${base}_copy_${System.currentTimeMillis() % 10000}$suffix"
+                }
+            }
+        }
+
+        if (source.isDirectory) {
+            val newDirUri = DocumentsContract.createDocument(
+                resolver,
+                parentDocUri,
+                DocumentsContract.Document.MIME_TYPE_DIR,
+                effectiveName
+            ) ?: throw IllegalStateException("SAF provider refused directory creation for '$effectiveName'")
+
+            val children = if (source.isSafDocument) {
+                listSafTreeDirectory(Uri.parse(source.safUriString ?: source.path), showHidden = true)
+            } else {
+                File(source.path).listFiles()?.map { it.toFileNode() } ?: emptyList()
+            }
+            children.forEach { child ->
+                copyNodeToSafDirectory(child, newDirUri, conflictPolicy)
+            }
+            return true
+        } else {
+            val newDocUri = DocumentsContract.createDocument(
+                resolver,
+                parentDocUri,
+                source.mimeType.ifBlank { "application/octet-stream" },
+                effectiveName
+            ) ?: throw IllegalStateException("SAF provider refused file creation for '$effectiveName'")
+
+            openNodeInputStream(source).use { input ->
+                resolver.openOutputStream(newDocUri, "w")?.use { output ->
+                    input.copyTo(output, 64 * 1024)
+                    output.flush()
+                } ?: throw IllegalStateException("Unable to open SAF output stream for '$effectiveName'")
+            }
+            return true
+        }
+    }
+
+    private fun resolveUniqueDestinationFile(destDir: File, originalName: String, isDirectory: Boolean): File {
+        val base = if (isDirectory) originalName else originalName.substringBeforeLast('.', originalName)
+        val ext = if (isDirectory) "" else originalName.substringAfterLast('.', "")
+        val suffix = if (ext.isNotEmpty()) ".$ext" else ""
+        var counter = 1
+        var candidate = File(destDir, "${base}_($counter)$suffix")
+        while (candidate.exists()) {
+            counter++
+            candidate = File(destDir, "${base}_($counter)$suffix")
+        }
+        return candidate
+    }
+
+    private fun openNodeInputStream(node: FileNode): InputStream {
+        return if (node.isSafDocument && node.safUriString != null) {
+            val resolver = context?.contentResolver
+                ?: throw IllegalStateException("ContentResolver required for SAF read.")
+            BufferedInputStream(
+                resolver.openInputStream(Uri.parse(node.safUriString))
+                    ?: throw IllegalStateException("Cannot open SAF input stream for ${node.name}"),
+                64 * 1024
+            )
+        } else {
+            BufferedInputStream(FileInputStream(File(node.path)), 64 * 1024)
+        }
+    }
+
+    private fun openNodeOutputStream(node: FileNode): OutputStream {
+        return if (node.isSafDocument && node.safUriString != null) {
+            val resolver = context?.contentResolver
+                ?: throw IllegalStateException("ContentResolver required for SAF write.")
+            BufferedOutputStream(
+                resolver.openOutputStream(Uri.parse(node.safUriString), "wt")
+                    ?: throw IllegalStateException("Cannot open SAF output stream for ${node.name}"),
+                64 * 1024
+            )
+        } else {
+            BufferedOutputStream(FileOutputStream(File(node.path)), 64 * 1024)
+        }
+    }
+
+    suspend fun compressNodesToZip(
+        sourceNodes: List<FileNode>,
+        destinationDirPathOrUri: String,
+        archiveName: String
+    ): Result<FileNode> = withContext(Dispatchers.IO) {
+        try {
+            val cleanName = if (archiveName.endsWith(".zip", ignoreCase = true)) archiveName else "$archiveName.zip"
+            val destIsSaf = destinationDirPathOrUri.startsWith("content://")
+            val tempZip = File(
+                context?.cacheDir ?: lumaWorkspaceDir,
+                "batch_pack_${System.currentTimeMillis()}_$cleanName"
+            )
+
+            ZipOutputStream(BufferedOutputStream(FileOutputStream(tempZip), 64 * 1024)).use { zos ->
+                val buffer = ByteArray(64 * 1024)
+
+                fun addNodeToZip(node: FileNode, prefixPath: String) {
+                    val entryPath = if (prefixPath.isEmpty()) node.name else "$prefixPath/${node.name}"
+                    if (node.isDirectory) {
+                        zos.putNextEntry(ZipEntry("$entryPath/"))
+                        zos.closeEntry()
+                        val children = if (node.isSafDocument) {
+                            listSafTreeDirectory(Uri.parse(node.safUriString ?: node.path), showHidden = true)
+                        } else {
+                            File(node.path).listFiles()?.map { it.toFileNode() } ?: emptyList()
+                        }
+                        children.forEach { child -> addNodeToZip(child, entryPath) }
+                    } else {
+                        zos.putNextEntry(ZipEntry(entryPath))
+                        openNodeInputStream(node).use { input ->
+                            var read: Int
+                            while (input.read(buffer).also { read = it } != -1) {
+                                zos.write(buffer, 0, read)
+                            }
+                        }
+                        zos.closeEntry()
+                    }
+                }
+
+                sourceNodes.forEach { node -> addNodeToZip(node, "") }
+            }
+
+            if (destIsSaf) {
+                val tempNode = tempZip.copyTo(File(tempZip.parentFile, cleanName), overwrite = true).toFileNode()
+                copyNodeToSafDirectory(tempNode, Uri.parse(destinationDirPathOrUri), ConflictPolicy.KEEP_BOTH)
+                tempZip.delete()
+                File(tempNode.path).delete()
+                Result.success(tempNode.copy(name = cleanName))
+            } else {
+                val destDir = File(destinationDirPathOrUri).apply { if (!exists()) mkdirs() }
+                val finalZip = resolveUniqueOrTargetFile(destDir, cleanName)
+                tempZip.copyTo(finalZip, overwrite = true)
+                tempZip.delete()
+                Result.success(finalZip.toFileNode())
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun resolveUniqueOrTargetFile(dir: File, name: String): File {
+        val candidate = File(dir, name)
+        return if (!candidate.exists()) candidate else resolveUniqueDestinationFile(dir, name, false)
+    }
+
     // ==================== LOSSLESS STUDIO LOADERS & EDITORS ====================
 
     suspend fun openFileInStudio(
@@ -316,7 +666,8 @@ class FileSystemAndFormatEngine(
         forceHexInspector: Boolean = false,
         charsetName: String = "UTF-8",
         pdfPageIndex: Int = 0,
-        hexWindowOffset: Long = 0L
+        hexWindowOffset: Long = 0L,
+        sqliteTableName: String? = null
     ): Result<StudioContent> = withContext(Dispatchers.IO) {
         try {
             val file = resolveLocalFileForStudio(node)
@@ -331,10 +682,18 @@ class FileSystemAndFormatEngine(
             }
 
             val content = when (node.category) {
-                FileFormatCategory.TEXT_CODE, FileFormatCategory.MARKDOWN ->
+                FileFormatCategory.TEXT_CODE,
+                FileFormatCategory.MARKDOWN,
+                FileFormatCategory.STRUCTURED_DATA ->
                     loadTextOrCodeEditor(node, file, charsetName)
                 FileFormatCategory.DOCX ->
                     loadDocxEditor(node, file)
+                FileFormatCategory.CSV_TSV ->
+                    loadCsvGridStudio(node, file)
+                FileFormatCategory.SQLITE_DB ->
+                    loadSqliteStudio(node, file, sqliteTableName)
+                FileFormatCategory.APK_PACKAGE ->
+                    loadApkInspectorStudio(node, file)
                 FileFormatCategory.PDF ->
                     loadPdfPage(node, file, pdfPageIndex)
                 FileFormatCategory.ARCHIVE_ZIP ->
@@ -354,9 +713,9 @@ class FileSystemAndFormatEngine(
 
     private fun resolveLocalFileForStudio(node: FileNode): File {
         if (!node.isSafDocument) return File(node.path)
-        val cacheCopy = File(context.cacheDir, "saf_studio_${node.name}")
-        val uri = Uri.parse(node.safUriString ?: node.path)
-        context.contentResolver.openInputStream(uri)?.use { input ->
+        val cacheDir = context?.cacheDir ?: lumaWorkspaceDir
+        val cacheCopy = File(cacheDir, "saf_studio_${node.name}")
+        openNodeInputStream(node).use { input ->
             FileOutputStream(cacheCopy).use { output ->
                 input.copyTo(output, 64 * 1024)
             }
@@ -364,8 +723,19 @@ class FileSystemAndFormatEngine(
         return cacheCopy
     }
 
+    private fun syncTempFileBackToNodeIfSaf(node: FileNode, modifiedLocalFile: File) {
+        if (node.isSafDocument && node.safUriString != null) {
+            FileInputStream(modifiedLocalFile).use { input ->
+                openNodeOutputStream(node).use { output ->
+                    input.copyTo(output, 64 * 1024)
+                    output.flush()
+                }
+            }
+        }
+    }
+
     private fun loadTextOrCodeEditor(node: FileNode, file: File, charsetName: String): StudioContent.TextCodeEditor {
-        val maxWindowBytes = 512 * 1024 // 512 KB lossless window for ultra-smooth editor performance
+        val maxWindowBytes = 512 * 1024
         val totalLen = file.length()
         val isTruncated = totalLen > maxWindowBytes
         val readBytes = minOf(totalLen, maxWindowBytes.toLong()).toInt()
@@ -381,15 +751,120 @@ class FileSystemAndFormatEngine(
         val charset = runCatching { Charset.forName(charsetName) }.getOrDefault(Charsets.UTF_8)
         val text = String(buffer, charset)
         val lines = text.count { it == '\n' } + 1
+        val isStructured = node.category == FileFormatCategory.STRUCTURED_DATA ||
+            node.extension in setOf("json", "xml", "yaml", "yml")
+        val validationMsg = if (isStructured) validateStructuredSyntax(text, node.extension) else null
+
         return StudioContent.TextCodeEditor(
             file = node,
             textContent = text,
             encoding = charset.displayName(),
             lineCount = lines,
             isMarkdown = node.category == FileFormatCategory.MARKDOWN,
+            isStructuredData = isStructured,
+            validationMessage = validationMsg,
             isTruncatedPreview = isTruncated,
             totalFileBytes = totalLen
         )
+    }
+
+    fun formatAndValidateStructuredText(rawText: String, extension: String): Pair<String, String> {
+        val ext = extension.lowercase()
+        return try {
+            when (ext) {
+                "json" -> {
+                    val formatted = prettyFormatAndValidateJson(rawText)
+                    Pair(formatted, "Valid JSON Syntax • Formatted with 2-space indentation")
+                }
+                "xml" -> {
+                    val factory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
+                    val doc = factory.newDocumentBuilder().parse(ByteArrayInputStream(rawText.trim().toByteArray(Charsets.UTF_8)))
+                    val transformer = TransformerFactory.newInstance().newTransformer().apply {
+                        setOutputProperty(OutputKeys.INDENT, "yes")
+                        setOutputProperty("{http://xml.apache.org/xslt}indent-amount", "2")
+                    }
+                    val writer = StringWriter()
+                    transformer.transform(DOMSource(doc), StreamResult(writer))
+                    Pair(writer.toString(), "Valid W3C XML Document • Pretty-Formatted")
+                }
+                else -> {
+                    Pair(rawText, "Syntax Validated (${ext.uppercase()})")
+                }
+            }
+        } catch (e: Exception) {
+            Pair(rawText, "Syntax Error: ${e.message}")
+        }
+    }
+
+    private fun prettyFormatAndValidateJson(input: String): String {
+        val src = input.trim()
+        require(src.isNotEmpty()) { "JSON input is empty" }
+        require(
+            (src.startsWith("{") && src.endsWith("}")) ||
+                (src.startsWith("[") && src.endsWith("]"))
+        ) { "JSON root must be an Object {...} or Array [...]" }
+
+        val sb = StringBuilder(src.length + 64)
+        var indent = 0
+        var inString = false
+        var escaped = false
+        val bracketStack = ArrayDeque<Char>()
+
+        for (i in src.indices) {
+            val c = src[i]
+            if (inString) {
+                sb.append(c)
+                if (escaped) {
+                    escaped = false
+                } else if (c == '\\') {
+                    escaped = true
+                } else if (c == '"') {
+                    inString = false
+                }
+                continue
+            }
+
+            when (c) {
+                '"' -> {
+                    inString = true
+                    sb.append(c)
+                }
+                '{', '[' -> {
+                    bracketStack.addLast(c)
+                    sb.append(c)
+                    indent++
+                    sb.append('\n').append("  ".repeat(indent))
+                }
+                '}', ']' -> {
+                    require(bracketStack.isNotEmpty()) { "Unexpected closing bracket '$c' at index $i" }
+                    val open = bracketStack.removeLast()
+                    require((open == '{' && c == '}') || (open == '[' && c == ']')) {
+                        "Mismatched JSON bracket '$open' closed by '$c' at index $i"
+                    }
+                    indent = (indent - 1).coerceAtLeast(0)
+                    sb.append('\n').append("  ".repeat(indent)).append(c)
+                }
+                ',' -> {
+                    sb.append(",\n").append("  ".repeat(indent))
+                }
+                ':' -> {
+                    sb.append(": ")
+                }
+                ' ', '\t', '\r', '\n' -> {
+                    // Ignore insignificant whitespace outside string literals
+                }
+                else -> {
+                    sb.append(c)
+                }
+            }
+        }
+        require(!inString) { "Unterminated JSON string literal" }
+        require(bracketStack.isEmpty()) { "Unclosed JSON bracket '${bracketStack.last()}'" }
+        return sb.toString()
+    }
+
+    private fun validateStructuredSyntax(rawText: String, extension: String): String {
+        return formatAndValidateStructuredText(rawText, extension).second
     }
 
     suspend fun saveTextOrCodeFileLosslessly(
@@ -401,11 +876,10 @@ class FileSystemAndFormatEngine(
             val charset = runCatching { Charset.forName(charsetName) }.getOrDefault(Charsets.UTF_8)
             val bytes = newTextContent.toByteArray(charset)
             if (node.isSafDocument) {
-                val uri = Uri.parse(node.safUriString ?: node.path)
-                context.contentResolver.openOutputStream(uri, "wt")?.use { out ->
+                openNodeOutputStream(node).use { out ->
                     out.write(bytes)
                     out.flush()
-                } ?: throw IllegalStateException("SAF output stream rejected write access for ${node.name}")
+                }
                 Result.success(node.copy(sizeBytes = bytes.size.toLong(), lastModified = System.currentTimeMillis()))
             } else {
                 val target = File(node.path)
@@ -425,10 +899,16 @@ class FileSystemAndFormatEngine(
         }
     }
 
-    private fun loadDocxEditor(node: FileNode, file: File): StudioContent.DocxEditor {
-        val paragraphs = mutableListOf<String>()
+    // ==================== W3C DOM STRUCTURE-PRESERVING DOCX STUDIO ====================
+
+    fun loadDocxEditor(
+        node: FileNode,
+        file: File = resolveLocalFileForStudio(node)
+    ): StudioContent.DocxEditor {
+        val paragraphNodes = mutableListOf<DocxParagraphNode>()
         var xmlEntries = 0
         var mediaEntries = 0
+        var preservedStyles = 0
 
         ZipFile(file).use { zip ->
             val entries = zip.entries()
@@ -437,57 +917,67 @@ class FileSystemAndFormatEngine(
                 if (entry.name.endsWith(".xml") || entry.name.endsWith(".rels")) xmlEntries++
                 if (entry.name.startsWith("word/media/")) mediaEntries++
                 if (entry.name == "word/document.xml") {
-                    val xmlText = zip.getInputStream(entry).bufferedReader(Charsets.UTF_8).readText()
-                    val paragraphRegex = Regex("<w:p[\\s>].*?</w:p>", RegexOption.DOT_MATCHES_ALL)
-                    val textRunRegex = Regex("<w:t(?:\\s[^>]*)?>(.*?)</w:t>", RegexOption.DOT_MATCHES_ALL)
-                    paragraphRegex.findAll(xmlText).forEach { pMatch ->
-                        val combined = textRunRegex.findAll(pMatch.value)
-                            .map { it.groupValues[1] }
-                            .joinToString("")
-                            .replace("&lt;", "<")
-                            .replace("&gt;", ">")
-                            .replace("&amp;", "&")
-                        if (combined.isNotBlank()) {
-                            paragraphs.add(combined)
+                    val domDoc = parseXmlDom(zip.getInputStream(entry))
+                    val pList = findElementsByLocalName(domDoc.documentElement, "p")
+                    pList.forEachIndexed { idx, pElem ->
+                        val styleId = extractParagraphStyleId(pElem)
+                        val hasRPr = findElementsByLocalName(pElem, "rPr").isNotEmpty()
+                        if (styleId != "Normal" || hasRPr) preservedStyles++
+                        val tElements = findElementsByLocalName(pElem, "t")
+                        val combinedText = tElements.joinToString("") { it.textContent ?: "" }
+                        if (combinedText.isNotEmpty() || tElements.isNotEmpty()) {
+                            paragraphNodes.add(
+                                DocxParagraphNode(
+                                    index = idx,
+                                    styleId = styleId,
+                                    text = combinedText,
+                                    hasRunFormatting = hasRPr
+                                )
+                            )
                         }
                     }
                 }
             }
         }
-        if (paragraphs.isEmpty()) {
-            paragraphs.add("(Empty .docx document — add paragraphs below and tap Save to update word/document.xml)")
+        if (paragraphNodes.isEmpty()) {
+            paragraphNodes.add(
+                DocxParagraphNode(0, "Normal", "(Empty .docx document — add paragraphs below)", false)
+            )
         }
         return StudioContent.DocxEditor(
             file = node,
-            paragraphs = paragraphs,
+            paragraphNodes = paragraphNodes,
             xmlEntriesCount = xmlEntries,
-            embeddedMediaCount = mediaEntries
+            embeddedMediaCount = mediaEntries,
+            preservedStylesCount = preservedStyles
         )
     }
 
+    // Rewrites word/document.xml using W3C DOM XML manipulation so all existing <w:pPr>, <w:rPr>,
+    // tables (<w:tbl>), section properties (<w:sectPr>), namespaces, and companion archive files
+    // (word/styles.xml, word/media/, _rels/.rels) remain 100% preserved.
     suspend fun saveDocxParagraphsLosslessly(
         node: FileNode,
         updatedParagraphs: List<String>
     ): Result<FileNode> = withContext(Dispatchers.IO) {
         try {
-            val sourceFile = File(node.path)
-            val tempFile = File(sourceFile.parentFile, ".${sourceFile.name}.docx_tmp")
+            val localFile = resolveLocalFileForStudio(node)
+            val tempFile = File(localFile.parentFile, ".${localFile.name}.docx_dom_tmp")
 
-            val bodyXml = updatedParagraphs.filter { it.isNotBlank() }.joinToString("\n") { p ->
-                val escaped = p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-                "<w:p><w:r><w:t>$escaped</w:t></w:r></w:p>"
+            var updatedDocXmlBytes: ByteArray? = null
+            ZipFile(localFile).use { zip ->
+                val docEntry = zip.getEntry("word/document.xml")
+                if (docEntry != null) {
+                    val domDoc = parseXmlDom(zip.getInputStream(docEntry))
+                    mutateDocxDomParagraphs(domDoc, updatedParagraphs)
+                    updatedDocXmlBytes = serializeXmlDom(domDoc)
+                }
             }
-            val newDocXml = """
-                <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-                <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
-                    <w:body>
-                        $bodyXml
-                    </w:body>
-                </w:document>
-            """.trimIndent().toByteArray(Charsets.UTF_8)
+
+            val finalDocBytes = updatedDocXmlBytes ?: buildFallbackDocxXml(updatedParagraphs)
 
             var wroteDocXml = false
-            ZipInputStream(BufferedInputStream(FileInputStream(sourceFile))).use { zis ->
+            ZipInputStream(BufferedInputStream(FileInputStream(localFile))).use { zis ->
                 ZipOutputStream(BufferedOutputStream(FileOutputStream(tempFile))).use { zos ->
                     var entry: ZipEntry?
                     val buffer = ByteArray(32 * 1024)
@@ -495,7 +985,7 @@ class FileSystemAndFormatEngine(
                         val current = entry!!
                         zos.putNextEntry(ZipEntry(current.name))
                         if (current.name == "word/document.xml") {
-                            zos.write(newDocXml)
+                            zos.write(finalDocBytes)
                             wroteDocXml = true
                         } else {
                             var len: Int
@@ -507,21 +997,440 @@ class FileSystemAndFormatEngine(
                     }
                     if (!wroteDocXml) {
                         zos.putNextEntry(ZipEntry("word/document.xml"))
-                        zos.write(newDocXml)
+                        zos.write(finalDocBytes)
                         zos.closeEntry()
                     }
                 }
             }
 
-            if (!tempFile.renameTo(sourceFile)) {
-                tempFile.copyTo(sourceFile, overwrite = true)
+            if (!tempFile.renameTo(localFile)) {
+                tempFile.copyTo(localFile, overwrite = true)
                 tempFile.delete()
             }
-            Result.success(sourceFile.toFileNode())
+            syncTempFileBackToNodeIfSaf(node, localFile)
+            Result.success(if (node.isSafDocument) node.copy(sizeBytes = localFile.length()) else localFile.toFileNode())
         } catch (e: Exception) {
             Result.failure(e)
         }
     }
+
+    private fun parseXmlDom(inputStream: InputStream): Document {
+        val factory = DocumentBuilderFactory.newInstance().apply {
+            isNamespaceAware = true
+            isExpandEntityReferences = false
+        }
+        return factory.newDocumentBuilder().parse(inputStream)
+    }
+
+    private fun serializeXmlDom(doc: Document): ByteArray {
+        val transformer = TransformerFactory.newInstance().newTransformer().apply {
+            setOutputProperty(OutputKeys.ENCODING, "UTF-8")
+            setOutputProperty(OutputKeys.OMIT_XML_DECLARATION, "no")
+        }
+        val out = ByteArrayOutputStream()
+        transformer.transform(DOMSource(doc), StreamResult(out))
+        return out.toByteArray()
+    }
+
+    private fun mutateDocxDomParagraphs(doc: Document, updatedParagraphs: List<String>) {
+        val root = doc.documentElement ?: return
+        val wNs = root.lookupNamespaceURI("w") ?: "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        val bodyElem = findElementsByLocalName(root, "body").firstOrNull() ?: root
+        val existingParas = findElementsByLocalName(bodyElem, "p")
+
+        // 1. Update existing <w:p> elements in-place, preserving <w:pPr> and <w:rPr>
+        val minCount = minOf(existingParas.size, updatedParagraphs.size)
+        for (i in 0 until minCount) {
+            val pElem = existingParas[i]
+            val newText = updatedParagraphs[i]
+            val tNodes = findElementsByLocalName(pElem, "t")
+            if (tNodes.isNotEmpty()) {
+                tNodes[0].textContent = newText
+                tNodes[0].setAttribute("xml:space", "preserve")
+                // Clear extra split text runs inside the same paragraph while leaving run formatting intact
+                for (j in 1 until tNodes.size) {
+                    tNodes[j].textContent = ""
+                }
+            } else {
+                val rElem = findElementsByLocalName(pElem, "r").firstOrNull()
+                    ?: doc.createElementNS(wNs, "w:r").also { pElem.appendChild(it) }
+                val tElem = doc.createElementNS(wNs, "w:t").apply {
+                    setAttribute("xml:space", "preserve")
+                    textContent = newText
+                }
+                rElem.appendChild(tElem)
+            }
+        }
+
+        // 2. If paragraphs were deleted by the user, remove trailing <w:p> nodes from parent
+        if (updatedParagraphs.size < existingParas.size) {
+            for (i in updatedParagraphs.size until existingParas.size) {
+                val pToRemove = existingParas[i]
+                pToRemove.parentNode?.removeChild(pToRemove)
+            }
+        }
+
+        // 3. If new paragraphs were added by the user, insert before <w:sectPr> (if present)
+        if (updatedParagraphs.size > existingParas.size) {
+            val sectPr = findElementsByLocalName(bodyElem, "sectPr").firstOrNull()
+            for (i in existingParas.size until updatedParagraphs.size) {
+                val newP = doc.createElementNS(wNs, "w:p")
+                val newR = doc.createElementNS(wNs, "w:r")
+                val newT = doc.createElementNS(wNs, "w:t").apply {
+                    setAttribute("xml:space", "preserve")
+                    textContent = updatedParagraphs[i]
+                }
+                newR.appendChild(newT)
+                newP.appendChild(newR)
+                if (sectPr != null && sectPr.parentNode == bodyElem) {
+                    bodyElem.insertBefore(newP, sectPr)
+                } else {
+                    bodyElem.appendChild(newP)
+                }
+            }
+        }
+    }
+
+    private fun extractParagraphStyleId(pElem: Element): String {
+        val pStyle = findElementsByLocalName(pElem, "pStyle").firstOrNull() ?: return "Normal"
+        for (i in 0 until pStyle.attributes.length) {
+            val attr = pStyle.attributes.item(i)
+            if (attr.localName == "val" || attr.nodeName.endsWith(":val") || attr.nodeName == "val") {
+                return attr.nodeValue ?: "Normal"
+            }
+        }
+        return "Normal"
+    }
+
+    private fun findElementsByLocalName(parent: Element, localName: String): List<Element> {
+        val result = mutableListOf<Element>()
+        fun traverse(node: Node) {
+            val children = node.childNodes
+            for (i in 0 until children.length) {
+                val child = children.item(i)
+                if (child is Element) {
+                    val childLocal = child.localName ?: child.tagName.substringAfter(':')
+                    if (childLocal == localName) {
+                        result.add(child)
+                    }
+                    traverse(child)
+                }
+            }
+        }
+        traverse(parent)
+        return result
+    }
+
+    private fun buildFallbackDocxXml(paragraphs: List<String>): ByteArray {
+        val bodyXml = paragraphs.joinToString("") { p ->
+            val escaped = p.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            "<w:p><w:r><w:t xml:space=\"preserve\">$escaped</w:t></w:r></w:p>"
+        }
+        val xml = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>" +
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">" +
+            "<w:body>$bodyXml</w:body>" +
+            "</w:document>"
+        return xml.toByteArray(Charsets.UTF_8)
+    }
+
+    // ==================== CSV / TSV SPREADSHEET GRID STUDIO ====================
+
+    fun loadCsvGridStudio(
+        node: FileNode,
+        file: File = resolveLocalFileForStudio(node)
+    ): StudioContent.CsvGridStudio {
+        val delimiter = if (node.extension == "tsv") '\t' else ','
+        val lines = file.readLines(Charsets.UTF_8).filter { it.isNotBlank() }
+        if (lines.isEmpty()) {
+            return StudioContent.CsvGridStudio(
+                file = node,
+                delimiter = delimiter,
+                headers = listOf("Column_1", "Column_2", "Column_3"),
+                rows = listOf(listOf("", "", ""))
+            )
+        }
+        val parsed = lines.map { parseCsvLine(it, delimiter) }
+        val maxCols = parsed.maxOfOrNull { it.size }?.coerceAtLeast(1) ?: 1
+        val normalized = parsed.map { row ->
+            if (row.size < maxCols) row + List(maxCols - row.size) { "" } else row
+        }
+        return StudioContent.CsvGridStudio(
+            file = node,
+            delimiter = delimiter,
+            headers = normalized.first(),
+            rows = normalized.drop(1).ifEmpty { listOf(List(maxCols) { "" }) }
+        )
+    }
+
+    private fun parseCsvLine(line: String, delimiter: Char): List<String> {
+        val cells = mutableListOf<String>()
+        val sb = StringBuilder()
+        var inQuotes = false
+        var i = 0
+        while (i < line.length) {
+            val c = line[i]
+            when {
+                c == '"' -> {
+                    if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
+                        sb.append('"')
+                        i++
+                    } else {
+                        inQuotes = !inQuotes
+                    }
+                }
+                c == delimiter && !inQuotes -> {
+                    cells.add(sb.toString().trim())
+                    sb.clear()
+                }
+                else -> sb.append(c)
+            }
+            i++
+        }
+        cells.add(sb.toString().trim())
+        return cells
+    }
+
+    suspend fun saveCsvGridLosslessly(
+        node: FileNode,
+        delimiter: Char,
+        headers: List<String>,
+        rows: List<List<String>>
+    ): Result<FileNode> = withContext(Dispatchers.IO) {
+        val allRows = listOf(headers) + rows
+        val serialized = allRows.joinToString("\n") { row ->
+            row.joinToString(delimiter.toString()) { cell ->
+                if (cell.contains(delimiter) || cell.contains('"') || cell.contains('\n')) {
+                    "\"${cell.replace("\"", "\"\"")}\""
+                } else {
+                    cell
+                }
+            }
+        }
+        saveTextOrCodeFileLosslessly(node, serialized, "UTF-8")
+    }
+
+    // ==================== SQLITE DATABASE (.db / .sqlite) STUDIO ====================
+
+    suspend fun loadSqliteStudioForTable(
+        node: FileNode,
+        selectedTable: String
+    ): Result<StudioContent.SqliteStudio> = withContext(Dispatchers.IO) {
+        try {
+            val localFile = resolveLocalFileForStudio(node)
+            Result.success(loadSqliteStudio(node, localFile, selectedTable))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun loadSqliteStudio(
+        node: FileNode,
+        file: File,
+        requestedTable: String? = null,
+        customQueryMsg: String? = null
+    ): StudioContent.SqliteStudio {
+        val db = SQLiteDatabase.openDatabase(file.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+        try {
+            val tables = mutableListOf<String>()
+            db.rawQuery(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'android_%' ORDER BY name",
+                null
+            ).use { cursor ->
+                while (cursor.moveToNext()) {
+                    tables.add(cursor.getString(0))
+                }
+            }
+
+            if (tables.isEmpty()) {
+                return StudioContent.SqliteStudio(
+                    file = node,
+                    tableNames = listOf("(No tables)"),
+                    selectedTable = "(No tables)",
+                    columns = listOf("Info"),
+                    rows = listOf(listOf("SQLite database contains no user tables.")),
+                    totalRowsInTable = 0,
+                    customQueryResultMessage = customQueryMsg
+                )
+            }
+
+            val activeTable = if (requestedTable != null && requestedTable in tables) {
+                requestedTable
+            } else {
+                tables.first()
+            }
+
+            var totalCount = 0
+            runCatching {
+                db.rawQuery("SELECT COUNT(*) FROM `$activeTable`", null).use { c ->
+                    if (c.moveToFirst()) totalCount = c.getInt(0)
+                }
+            }
+
+            val cols = mutableListOf<String>()
+            val rows = mutableListOf<List<String>>()
+            db.rawQuery("SELECT * FROM `$activeTable` LIMIT 100", null).use { cursor ->
+                cols.addAll(cursor.columnNames)
+                val colCount = cursor.columnCount
+                while (cursor.moveToNext()) {
+                    val rowVals = (0 until colCount).map { idx ->
+                        runCatching { cursor.getString(idx) ?: "NULL" }.getOrDefault("[BLOB]")
+                    }
+                    rows.add(rowVals)
+                }
+            }
+
+            return StudioContent.SqliteStudio(
+                file = node,
+                tableNames = tables,
+                selectedTable = activeTable,
+                columns = cols,
+                rows = rows,
+                totalRowsInTable = totalCount,
+                customQueryResultMessage = customQueryMsg
+            )
+        } finally {
+            db.close()
+        }
+    }
+
+    suspend fun executeSqliteQuery(
+        node: FileNode,
+        activeTable: String,
+        sqlStatement: String
+    ): Result<StudioContent.SqliteStudio> = withContext(Dispatchers.IO) {
+        try {
+            val localFile = resolveLocalFileForStudio(node)
+            val trimmed = sqlStatement.trim()
+            val isSelect = trimmed.startsWith("SELECT", ignoreCase = true) ||
+                trimmed.startsWith("PRAGMA", ignoreCase = true)
+
+            if (isSelect) {
+                val db = SQLiteDatabase.openDatabase(localFile.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
+                try {
+                    val tables = mutableListOf<String>()
+                    db.rawQuery(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'android_%' ORDER BY name",
+                        null
+                    ).use { c ->
+                        while (c.moveToNext()) tables.add(c.getString(0))
+                    }
+                    val cols = mutableListOf<String>()
+                    val rows = mutableListOf<List<String>>()
+                    db.rawQuery(trimmed, null).use { cursor ->
+                        cols.addAll(cursor.columnNames)
+                        while (cursor.moveToNext()) {
+                            rows.add((0 until cursor.columnCount).map { i ->
+                                runCatching { cursor.getString(i) ?: "NULL" }.getOrDefault("[BLOB]")
+                            })
+                        }
+                    }
+                    Result.success(
+                        StudioContent.SqliteStudio(
+                            file = node,
+                            tableNames = tables,
+                            selectedTable = activeTable,
+                            columns = cols,
+                            rows = rows,
+                            totalRowsInTable = rows.size,
+                            customQueryResultMessage = "Query returned ${rows.size} rows."
+                        )
+                    )
+                } finally {
+                    db.close()
+                }
+            } else {
+                val db = SQLiteDatabase.openDatabase(localFile.absolutePath, null, SQLiteDatabase.OPEN_READWRITE)
+                try {
+                    db.execSQL(trimmed)
+                } finally {
+                    db.close()
+                }
+                syncTempFileBackToNodeIfSaf(node, localFile)
+                Result.success(
+                    loadSqliteStudio(
+                        node = node,
+                        file = localFile,
+                        requestedTable = activeTable,
+                        customQueryMsg = "Executed SQL statement successfully."
+                    )
+                )
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    // ==================== APK PACKAGE ARCHIVE INSPECTOR ====================
+
+    private fun loadApkInspectorStudio(node: FileNode, file: File): StudioContent.ApkInspectorStudio {
+        var pkgName = "Unknown Package"
+        var verName = "1.0"
+        var verCode = 1L
+        var minSdk = 24
+        var targetSdk = 36
+        val permissions = mutableListOf<String>()
+        val activities = mutableListOf<String>()
+
+        runCatching {
+            val pm = context?.packageManager
+            val flags = PackageManager.GET_PERMISSIONS or PackageManager.GET_ACTIVITIES
+            @Suppress("DEPRECATION")
+            val info = pm?.getPackageArchiveInfo(file.absolutePath, flags)
+            if (info != null) {
+                pkgName = info.packageName ?: pkgName
+                verName = info.versionName ?: verName
+                verCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    info.longVersionCode
+                } else {
+                    @Suppress("DEPRECATION")
+                    info.versionCode.toLong()
+                }
+                info.applicationInfo?.let { appInfo ->
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                        minSdk = appInfo.minSdkVersion
+                    }
+                    targetSdk = appInfo.targetSdkVersion
+                }
+                info.requestedPermissions?.let { permissions.addAll(it) }
+                info.activities?.mapNotNull { it.name }?.let { activities.addAll(it) }
+            }
+        }
+
+        val nativeLibs = mutableListOf<String>()
+        var dexCount = 0
+        var totalEntries = 0
+        runCatching {
+            ZipFile(file).use { zip ->
+                val entries = zip.entries()
+                while (entries.hasMoreElements()) {
+                    val entry = entries.nextElement()
+                    totalEntries++
+                    if (entry.name.endsWith(".dex")) dexCount++
+                    if (entry.name.startsWith("lib/") && entry.name.endsWith(".so")) {
+                        nativeLibs.add(entry.name.removePrefix("lib/"))
+                    }
+                }
+            }
+        }
+
+        val sha256 = cryptoEngine.computeHash(file, "SHA-256")
+        return StudioContent.ApkInspectorStudio(
+            file = node,
+            packageName = pkgName,
+            versionName = verName,
+            versionCode = verCode,
+            minSdk = minSdk,
+            targetSdk = targetSdk,
+            permissions = permissions,
+            activities = activities,
+            nativeLibraries = nativeLibs,
+            dexFilesCount = dexCount,
+            totalEntriesCount = totalEntries,
+            sha256Signature = sha256
+        )
+    }
+
+    // ==================== PDF, ZIP, MEDIA, IMAGE & HEX STUDIOS ====================
 
     private fun loadPdfPage(node: FileNode, file: File, requestedPageIndex: Int): StudioContent.PdfViewer {
         val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
@@ -558,7 +1467,7 @@ class FileSystemAndFormatEngine(
 
     suspend fun savePdfAnnotationNotes(node: FileNode, notesText: String): Result<File> = withContext(Dispatchers.IO) {
         try {
-            val pdfFile = File(node.path)
+            val pdfFile = resolveLocalFileForStudio(node)
             val noteFile = File(pdfFile.parentFile, "${pdfFile.name}.notes.txt")
             noteFile.writeText(notesText)
             Result.success(noteFile)
@@ -606,7 +1515,7 @@ class FileSystemAndFormatEngine(
 
     suspend fun extractZipArchive(node: FileNode, targetDir: File): Result<Int> = withContext(Dispatchers.IO) {
         try {
-            val zipFile = File(node.path)
+            val zipFile = resolveLocalFileForStudio(node)
             val destRoot = File(targetDir, zipFile.nameWithoutExtension + "_extracted").apply { mkdirs() }
             var extractedCount = 0
             ZipInputStream(BufferedInputStream(FileInputStream(zipFile))).use { zis ->
@@ -645,7 +1554,7 @@ class FileSystemAndFormatEngine(
         entryContent: String
     ): Result<FileNode> = withContext(Dispatchers.IO) {
         try {
-            val sourceZip = File(node.path)
+            val sourceZip = resolveLocalFileForStudio(node)
             val tempZip = File(sourceZip.parentFile, ".${sourceZip.name}.repack_tmp")
             val payloadBytes = entryContent.toByteArray(Charsets.UTF_8)
 
@@ -676,7 +1585,8 @@ class FileSystemAndFormatEngine(
                 tempZip.copyTo(sourceZip, overwrite = true)
                 tempZip.delete()
             }
-            Result.success(sourceZip.toFileNode())
+            syncTempFileBackToNodeIfSaf(node, sourceZip)
+            Result.success(if (node.isSafDocument) node.copy(sizeBytes = sourceZip.length()) else sourceZip.toFileNode())
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -816,7 +1726,7 @@ class FileSystemAndFormatEngine(
         newByteHex: String
     ): Result<Unit> = withContext(Dispatchers.IO) {
         try {
-            val file = File(node.path)
+            val file = resolveLocalFileForStudio(node)
             val byteVal = newByteHex.trim().toInt(16).and(0xFF)
             RandomAccessFile(file, "rw").use { raf ->
                 require(byteOffset in 0 until raf.length()) {
@@ -825,6 +1735,7 @@ class FileSystemAndFormatEngine(
                 raf.seek(byteOffset)
                 raf.writeByte(byteVal)
             }
+            syncTempFileBackToNodeIfSaf(node, file)
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -834,7 +1745,7 @@ class FileSystemAndFormatEngine(
     // ==================== FILE OPERATIONS & ADVANCED TOOLS ====================
 
     suspend fun createNewFileOrFolder(
-        parentPath: String,
+        parentPathOrUri: String,
         name: String,
         isDirectory: Boolean,
         initialContent: String = ""
@@ -844,7 +1755,49 @@ class FileSystemAndFormatEngine(
             require(cleanName.isNotEmpty() && !cleanName.contains("/")) {
                 "Invalid name '$name': File/folder names cannot be empty or contain path separators ('/')."
             }
-            val target = File(parentPath, cleanName)
+
+            if (parentPathOrUri.startsWith("content://")) {
+                val resolver = context?.contentResolver
+                    ?: throw IllegalStateException("ContentResolver required for SAF creation.")
+                val treeUri = Uri.parse(parentPathOrUri)
+                val parentDocUri = if (DocumentsContract.isDocumentUri(context, treeUri)) {
+                    treeUri
+                } else {
+                    DocumentsContract.buildDocumentUriUsingTree(
+                        treeUri,
+                        DocumentsContract.getTreeDocumentId(treeUri)
+                    )
+                }
+                val ext = cleanName.substringAfterLast('.', "").lowercase()
+                val mime = if (isDirectory) DocumentsContract.Document.MIME_TYPE_DIR else detectMimeType(ext)
+                val createdUri = DocumentsContract.createDocument(resolver, parentDocUri, mime, cleanName)
+                    ?: throw IllegalStateException("SAF provider refused creation of '$cleanName'")
+
+                if (!isDirectory && initialContent.isNotEmpty()) {
+                    resolver.openOutputStream(createdUri, "w")?.use { out ->
+                        out.write(initialContent.toByteArray(Charsets.UTF_8))
+                    }
+                }
+                return@withContext Result.success(
+                    FileNode(
+                        name = cleanName,
+                        path = createdUri.toString(),
+                        isDirectory = isDirectory,
+                        sizeBytes = initialContent.toByteArray(Charsets.UTF_8).size.toLong(),
+                        lastModified = System.currentTimeMillis(),
+                        extension = ext,
+                        mimeType = mime,
+                        category = if (isDirectory) FileFormatCategory.DIRECTORY else detectCategory(ext, mime),
+                        permissionsRwx = if (isDirectory) "drwxr-x--- (SAF)" else "-rw-r----- (SAF)",
+                        isHidden = cleanName.startsWith("."),
+                        isSafDocument = true,
+                        safUriString = createdUri.toString(),
+                        safTreeRootUriString = parentPathOrUri
+                    )
+                )
+            }
+
+            val target = File(parentPathOrUri, cleanName)
             if (target.exists()) {
                 throw IllegalStateException("POSIX EEXIST: '${target.absolutePath}' already exists.")
             }
@@ -854,13 +1807,19 @@ class FileSystemAndFormatEngine(
                 }
             } else {
                 target.parentFile?.mkdirs()
-                if (cleanName.endsWith(".docx", ignoreCase = true)) {
-                    WorkspaceSeedEngine.createSampleDocx(
-                        target,
-                        listOf(initialContent.ifBlank { "New Word OOXML Document created in Luma Files Studio." })
-                    )
-                } else {
-                    target.writeText(initialContent)
+                when {
+                    cleanName.endsWith(".docx", ignoreCase = true) -> {
+                        WorkspaceSeedEngine.createSampleDocx(
+                            target,
+                            listOf(initialContent.ifBlank { "New Word OOXML Document created in Luma Files Studio v1.1.0." })
+                        )
+                    }
+                    cleanName.endsWith(".csv", ignoreCase = true) -> {
+                        target.writeText(initialContent.ifBlank { "Column_A,Column_B,Column_C\nValue_1,Value_2,Value_3" })
+                    }
+                    else -> {
+                        target.writeText(initialContent)
+                    }
                 }
             }
             Result.success(target.toFileNode())
@@ -872,8 +1831,10 @@ class FileSystemAndFormatEngine(
     suspend fun deleteFileOrDirectory(node: FileNode): Result<Unit> = withContext(Dispatchers.IO) {
         try {
             if (node.isSafDocument) {
+                val resolver = context?.contentResolver
+                    ?: throw IllegalStateException("ContentResolver required for SAF deletion.")
                 val uri = Uri.parse(node.safUriString ?: node.path)
-                val deleted = DocumentsContract.deleteDocument(context.contentResolver, uri)
+                val deleted = DocumentsContract.deleteDocument(resolver, uri)
                 if (!deleted) throw IllegalStateException("SAF provider refused deletion for ${node.name}")
             } else {
                 val target = File(node.path)
@@ -893,6 +1854,25 @@ class FileSystemAndFormatEngine(
         try {
             val clean = newName.trim()
             require(clean.isNotEmpty() && !clean.contains("/")) { "Invalid target filename '$newName'." }
+            if (node.isSafDocument) {
+                val resolver = context?.contentResolver
+                    ?: throw IllegalStateException("ContentResolver required for SAF rename.")
+                val uri = Uri.parse(node.safUriString ?: node.path)
+                val renamedUri = DocumentsContract.renameDocument(resolver, uri, clean)
+                    ?: throw IllegalStateException("SAF provider refused rename to '$clean'")
+                val ext = clean.substringAfterLast('.', "").lowercase()
+                val mime = if (node.isDirectory) DocumentsContract.Document.MIME_TYPE_DIR else detectMimeType(ext)
+                return@withContext Result.success(
+                    node.copy(
+                        name = clean,
+                        path = renamedUri.toString(),
+                        extension = ext,
+                        mimeType = mime,
+                        category = if (node.isDirectory) FileFormatCategory.DIRECTORY else detectCategory(ext, mime),
+                        safUriString = renamedUri.toString()
+                    )
+                )
+            }
             val src = File(node.path)
             val dst = File(src.parentFile, clean)
             if (dst.exists()) throw IllegalStateException("Target file '${dst.name}' already exists.")
@@ -912,6 +1892,20 @@ class FileSystemAndFormatEngine(
         prefix: String = ""
     ): Result<Int> = withContext(Dispatchers.IO) {
         try {
+            if (directoryPath.startsWith("content://")) {
+                val children = listSafTreeDirectory(Uri.parse(directoryPath), showHidden = true)
+                val regex = if (pattern.isNotBlank()) Regex(pattern) else null
+                var count = 0
+                children.filter { !it.isDirectory }.forEach { child ->
+                    val replaced = if (regex != null) regex.replace(child.name, replacement) else child.name
+                    val candidateName = "$prefix$replaced"
+                    if (candidateName != child.name && candidateName.isNotBlank()) {
+                        if (renameFile(child, candidateName).isSuccess) count++
+                    }
+                }
+                return@withContext Result.success(count)
+            }
+
             val dir = File(directoryPath)
             val files = dir.listFiles()?.filter { it.isFile } ?: emptyList()
             val regex = if (pattern.isNotBlank()) Regex(pattern) else null
@@ -959,10 +1953,7 @@ class FileSystemAndFormatEngine(
 
             walk(root, 0)
 
-            // Large files sorted descending
             val largeFiles = allFiles.sortedByDescending { it.sizeBytes }.take(15)
-
-            // Duplicate finder: group by non-zero exact byte size first, then SHA-256 hash
             val sizeGroups = allFiles.filter { it.sizeBytes > 0L }.groupBy { it.sizeBytes }.filter { it.value.size > 1 }
             val duplicateGroups = mutableListOf<DuplicateGroup>()
             var reclaimableBytes = 0L
