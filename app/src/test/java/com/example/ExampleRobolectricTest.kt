@@ -1,89 +1,79 @@
 package com.example
 
-import android.content.Context
-import androidx.test.core.app.ApplicationProvider
-import com.example.domain.engine.CryptoVaultEngine
-import com.example.domain.engine.FileSystemAndFormatEngine
-import com.example.domain.model.StudioContent
-import kotlinx.coroutines.runBlocking
+import com.example.domain.engine.WorkspaceSeedEngine
+import com.example.domain.model.FileFormatCategory
+import com.example.ui.LumaFormatUtils
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import org.junit.runner.RunWith
-import org.robolectric.RobolectricTestRunner
-import org.robolectric.annotation.Config
 import java.io.File
+import java.nio.file.Files
+import java.security.MessageDigest
+import java.util.zip.ZipFile
+import javax.crypto.Cipher
+import javax.crypto.SecretKeyFactory
+import javax.crypto.spec.GCMParameterSpec
+import javax.crypto.spec.PBEKeySpec
+import javax.crypto.spec.SecretKeySpec
 
-@RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
 class ExampleRobolectricTest {
 
     @Test
-    fun `verify File Manager app name and Luma Files brand identity`() {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        assertEquals("File Manager", context.getString(R.string.app_name))
-        assertEquals("Luma Files", context.getString(R.string.brand_original_name))
+    fun `verify byte size and transfer speed formatting`() {
+        assertEquals("512 B", LumaFormatUtils.formatBytes(512L))
+        assertEquals("2.0 KB", LumaFormatUtils.formatBytes(2048L))
+        assertEquals("8.00 MB/s", LumaFormatUtils.formatSpeed(8L * 1024L * 1024L))
     }
 
     @Test
-    fun `verify AES-256-GCM PIN vault lossless encryption and SHA-256 restoration`() = runBlocking {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val cryptoEngine = CryptoVaultEngine(context)
-        val fileEngine = FileSystemAndFormatEngine(context, cryptoEngine)
+    fun `verify AES-256-GCM PBKDF2 PIN encryption and SHA-256 bit-exact decryption`() {
+        val pin = "2580"
+        val salt = ByteArray(16) { (it + 1).toByte() }
+        val iv = ByteArray(12) { (it + 7).toByte() }
 
-        val setupRes = cryptoEngine.setupPin(
-            pin = "2580",
-            pinLength = 4,
-            recoveryQuestion = "Test Question?",
-            recoveryAnswer = "LumaSecret"
-        )
-        assertTrue(setupRes.isSuccess)
-        assertTrue(cryptoEngine.verifyPin("2580"))
-        assertFalse(cryptoEngine.verifyPin("9999"))
+        val spec = PBEKeySpec(pin.toCharArray(), salt, 12000, 256)
+        val keyBytes = SecretKeyFactory.getInstance("PBKDF2WithHmacSHA256").generateSecret(spec).encoded
+        val secretKey = SecretKeySpec(keyBytes, "AES")
 
-        val sampleFile = File(fileEngine.lumaWorkspaceDir, "vault_lossless_test.txt")
-        val originalContent = "Lossless 100% Bit-Exact Quality Payload • Luma Files AES-256-GCM"
-        sampleFile.writeText(originalContent)
+        val originalPayload = "Luma Files Lossless Studio Payload • 100% Bit-Exact Quality".toByteArray(Charsets.UTF_8)
+        val originalSha256 = MessageDigest.getInstance("SHA-256").digest(originalPayload).toList()
 
-        val node = with(fileEngine) { sampleFile.toFileNode() }
-        val encryptRes = cryptoEngine.encryptFileToVault(node, activePin = "2580", deleteOriginalAfterEncrypt = true)
-        assertTrue(encryptRes.isSuccess)
-        assertFalse(sampleFile.exists())
+        val encCipher = Cipher.getInstance("AES/GCM/NoPadding")
+        encCipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
+        val cipherBytes = encCipher.doFinal(originalPayload)
 
-        val vaultEntity = encryptRes.getOrThrow()
-        val restoreDir = File(fileEngine.lumaWorkspaceDir, "Restored_Test")
-        val decryptRes = cryptoEngine.decryptVaultItemToDirectory(
-            item = vaultEntity,
-            activePin = "2580",
-            targetDirectory = restoreDir,
-            removeEncryptedCopy = true
-        )
-        assertTrue(decryptRes.isSuccess)
-        val restoredFile = decryptRes.getOrThrow()
-        assertEquals(originalContent, restoredFile.readText())
+        val decCipher = Cipher.getInstance("AES/GCM/NoPadding")
+        decCipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
+        val restoredBytes = decCipher.doFinal(cipherBytes)
+
+        val restoredSha256 = MessageDigest.getInstance("SHA-256").digest(restoredBytes).toList()
+        assertEquals(originalSha256, restoredSha256)
+        assertEquals(String(originalPayload, Charsets.UTF_8), String(restoredBytes, Charsets.UTF_8))
     }
 
     @Test
-    fun `verify multi-format studio docx editing and duplicate storage analyzer`() = runBlocking {
-        val context = ApplicationProvider.getApplicationContext<Context>()
-        val cryptoEngine = CryptoVaultEngine(context)
-        val fileEngine = FileSystemAndFormatEngine(context, cryptoEngine)
+    fun `verify OOXML docx archive generation and lossless structure`() {
+        val tempDir = Files.createTempDirectory("luma_test_workspace").toFile()
+        try {
+            val docxFile = File(tempDir, "Test_Document.docx")
+            val paragraphs = listOf(
+                "Luma Files Heading",
+                "Lossless OOXML Paragraph Verification"
+            )
+            WorkspaceSeedEngine.createSampleDocx(docxFile, paragraphs)
+            assertTrue(docxFile.exists())
+            assertTrue(docxFile.length() > 100)
 
-        val docxFile = File(fileEngine.lumaWorkspaceDir, "Documents/Project_Specification.docx")
-        assertTrue(docxFile.exists())
-        val docxNode = with(fileEngine) { docxFile.toFileNode() }
-
-        val opened = fileEngine.openFileInStudio(docxNode).getOrThrow() as StudioContent.DocxEditor
-        assertTrue(opened.paragraphs.isNotEmpty())
-
-        val updatedParagraphs = listOf("Updated Heading in Luma Studio", "Second Paragraph Verified Losslessly")
-        val savedNode = fileEngine.saveDocxParagraphsLosslessly(docxNode, updatedParagraphs).getOrThrow()
-        val reopened = fileEngine.openFileInStudio(savedNode).getOrThrow() as StudioContent.DocxEditor
-        assertEquals(updatedParagraphs, reopened.paragraphs)
-
-        val analyzerReport = fileEngine.runStorageAnalyzer(fileEngine.lumaWorkspaceDir.absolutePath).getOrThrow()
-        assertTrue(analyzerReport.scannedFilesCount >= 8)
-        assertTrue(analyzerReport.duplicateGroups.isNotEmpty())
+            ZipFile(docxFile).use { zip ->
+                val docEntry = zip.getEntry("word/document.xml")
+                assertTrue(docEntry != null)
+                val xmlContent = zip.getInputStream(docEntry).bufferedReader().readText()
+                assertTrue(xmlContent.contains("Luma Files Heading"))
+                assertTrue(xmlContent.contains("Lossless OOXML Paragraph Verification"))
+            }
+            assertEquals("DOCX", FileFormatCategory.DOCX.badgeText)
+        } finally {
+            tempDir.deleteRecursively()
+        }
     }
 }

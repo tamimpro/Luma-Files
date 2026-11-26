@@ -28,7 +28,7 @@ abstract class LumaDatabase : RoomDatabase() {
                     context.applicationContext,
                     LumaDatabase::class.java,
                     "luma_files_db"
-                ).fallbackToDestructiveMigration().build()
+                ).fallbackToDestructiveMigration(true).build()
                 INSTANCE = instance
                 instance
             }
