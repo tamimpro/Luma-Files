@@ -16,16 +16,20 @@ import com.example.domain.engine.CryptoVaultEngine
 import com.example.domain.engine.DownloadPreset
 import com.example.domain.engine.FastDownloadEngine
 import com.example.domain.engine.FileSystemAndFormatEngine
+import com.example.domain.engine.PersistedDownloadCheckpoint
 import com.example.domain.model.ClipboardState
 import com.example.domain.model.ConflictPolicy
 import com.example.domain.model.DiagnosticError
 import com.example.domain.model.FileFormatCategory
 import com.example.domain.model.FileNode
 import com.example.domain.model.LumaTab
+import com.example.domain.model.RecycleBinItem
+import com.example.domain.model.ResolvedMediaManifest
 import com.example.domain.model.SortOption
 import com.example.domain.model.StorageAnalyzerReport
 import com.example.domain.model.StorageVolumeRoot
 import com.example.domain.model.StudioContent
+import com.example.domain.model.UndoOperation
 import com.example.domain.model.VaultAuthMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -39,7 +43,7 @@ import java.io.File
 data class ExplorerUiState(
     val activeTab: LumaTab = LumaTab.EXPLORER,
     val isAdvancedMode: Boolean = false,
-    val isDarkThemeOverride: Boolean? = null, // null = follow system, true = dark, false = light
+    val isDarkThemeOverride: Boolean? = null,
     val hasAllFilesAccess: Boolean = false,
     val isPermissionDecisionRemembered: Boolean = false,
     val showPermissionOnboardingDialog: Boolean = false,
@@ -54,13 +58,18 @@ data class ExplorerUiState(
     val searchQuery: String = "",
     val useRegexSearch: Boolean = false,
     val isLoading: Boolean = false,
+    // Recycle Bin & Per-Delete Choice Prompt + Undo System
+    val pendingDeleteTargets: List<FileNode> = emptyList(),
+    val recycleBinItems: List<RecycleBinItem> = emptyList(),
+    val showRecycleBinSheet: Boolean = false,
+    val lastUndoOperation: UndoOperation? = null,
     // Open-With Permission & Routing Prompt
     val pendingOpenWithFile: FileNode? = null,
     val alwaysAskBeforeOpen: Boolean = true,
     // Active Built-in Studio Content
     val activeStudioContent: StudioContent? = null,
     val studioHasUnsavedChanges: Boolean = false,
-    // Secure Vault Auth State
+    // Secure Vault Auth State (Wrapped 256-Bit Master DEK)
     val isPinConfigured: Boolean = false,
     val configuredPinLength: Int = 4,
     val vaultAuthMode: VaultAuthMode = VaultAuthMode.PIN_4,
@@ -68,6 +77,10 @@ data class ExplorerUiState(
     val unlockedPinInMemory: String = "",
     val recoveryQuestion: String = "",
     val vaultAuthError: String? = null,
+    // Smart Media & Stream Resolver State (Default vs. Advanced Download Mode)
+    val isResolvingMediaUrl: Boolean = false,
+    val resolvedMediaManifest: ResolvedMediaManifest? = null,
+    val selectedStreamVariantId: String = "",
     // Storage Analyzer State
     val analyzerReport: StorageAnalyzerReport? = null,
     val isAnalyzingStorage: Boolean = false,
@@ -101,6 +114,7 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
             storageRoots = fileEngine.getAvailableStorageRoots(),
             currentPath = initialDefaultPath,
             directoryStack = listOf(initialDefaultPath),
+            recycleBinItems = fileEngine.listRecycleBinItems(),
             isPinConfigured = cryptoEngine.isPinConfigured(),
             configuredPinLength = cryptoEngine.getConfiguredPinLength(),
             vaultAuthMode = cryptoEngine.getConfiguredAuthMode(),
@@ -129,6 +143,10 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
         }
         refreshCurrentDirectory()
         runStorageAnalyzer()
+        // Automatically recover any interrupted DOWNLOADING or QUEUED tasks on app startup
+        downloadEngine.recoverPersistentQueueOnLaunch { diag ->
+            _uiState.update { it.copy(activeDiagnosticError = diag) }
+        }
     }
 
     fun dismissPermissionOnboarding(rememberDecision: Boolean = true) {
@@ -157,9 +175,9 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                 isAdvancedMode = nextMode,
                 useRegexSearch = if (!nextMode) false else it.useRegexSearch,
                 statusBannerMessage = if (nextMode) {
-                    "Advanced Mode Enabled: Dotfiles, POSIX rwx flags, Checksums, Hex Patching, SQLite/APK & Regex unlocked."
+                    "Advanced Mode Enabled: Dotfiles, POSIX flags, Stream Selector, Hex Patching, SQLite/APK & Regex unlocked."
                 } else {
-                    "User-Friendly Default Mode Active."
+                    "Default Mode Active: Automatic highest-quality stream & simplified controls."
                 }
             )
         }
@@ -210,7 +228,7 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                 cryptoEngine.setPermissionOnboardingRemembered(true)
                 repository.addBookmark(
                     BookmarkEntity(
-                        title = "SAF Mount (${treeUri.lastPathSegment ?: "Folder"})",
+                        title = "SAF (${treeUri.lastPathSegment ?: "Folder"})",
                         pathOrUri = treeUri.toString(),
                         isSafTree = true
                     )
@@ -250,6 +268,10 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
         val currentState = _uiState.value
         if (currentState.activeStudioContent != null) {
             closeStudioEditor()
+            return true
+        }
+        if (currentState.showRecycleBinSheet) {
+            toggleRecycleBinSheet(false)
             return true
         }
         if (currentState.selectedFilePaths.isNotEmpty()) {
@@ -311,7 +333,11 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                         listed
                     }
                     _uiState.update {
-                        it.copy(files = filteredByCategory, isLoading = false)
+                        it.copy(
+                            files = filteredByCategory,
+                            recycleBinItems = fileEngine.listRecycleBinItems(),
+                            isLoading = false
+                        )
                     }
                 },
                 onFailure = { err ->
@@ -391,7 +417,7 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                     isMoveOperation = isMove,
                     conflictPolicy = state.clipboardState.conflictPolicy
                 ),
-                statusBannerMessage = "${if (isMove) "Cut" else "Copied"} '${node.name}' to clipboard. Navigate to destination and tap Paste."
+                statusBannerMessage = "${if (isMove) "Cut" else "Copied"} '${node.name}'. Navigate to destination and tap Paste."
             )
         }
     }
@@ -432,20 +458,34 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
 
         viewModelScope.launch {
             _uiState.update { it.copy(isLoading = true) }
-            val res = fileEngine.copyOrMoveBatch(
+            val res = fileEngine.copyOrMoveBatchWithUndo(
                 sourceNodes = clipboard.sourceNodes,
                 destinationDirPathOrUri = state.currentPath,
                 isMove = clipboard.isMoveOperation,
                 conflictPolicy = clipboard.conflictPolicy
             )
             res.fold(
-                onSuccess = { processedCount ->
+                onSuccess = { batchResult ->
+                    val processedCount = batchResult.processedCount
                     val skippedCount = (clipboard.sourceNodes.size - processedCount).coerceAtLeast(0)
+                    val undoOp: UndoOperation? = if (clipboard.isMoveOperation && batchResult.movedPairs.isNotEmpty()) {
+                        UndoOperation.ReverseMoveOperation(
+                            movedPairs = batchResult.movedPairs,
+                            summaryLabel = "Moved $processedCount item(s)"
+                        )
+                    } else if (!clipboard.isMoveOperation && batchResult.createdDestinationPaths.isNotEmpty()) {
+                        UndoOperation.DeleteCreatedPaths(
+                            createdPaths = batchResult.createdDestinationPaths,
+                            summaryLabel = "Copied $processedCount item(s)"
+                        )
+                    } else null
+
                     _uiState.update {
                         it.copy(
                             isLoading = false,
                             clipboardState = ClipboardState(),
-                            selectedFilePaths = emptySet()
+                            selectedFilePaths = emptySet(),
+                            lastUndoOperation = undoOp
                         )
                     }
                     repository.recordLog(
@@ -472,22 +512,205 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
+    // ==================== PER-DELETE CHOICE (RECYCLE BIN VS. PERMANENT SHRED) & UNDO ====================
+
+    fun requestDeleteSingleItem(node: FileNode) {
+        _uiState.update { it.copy(pendingDeleteTargets = listOf(node)) }
+    }
+
     fun batchDeleteSelected() {
         val state = _uiState.value
         val selectedNodes = state.files.filter { state.selectedFilePaths.contains(it.path) }
         if (selectedNodes.isEmpty()) return
+        _uiState.update { it.copy(pendingDeleteTargets = selectedNodes) }
+    }
+
+    fun dismissDeleteChoiceDialog() {
+        _uiState.update { it.copy(pendingDeleteTargets = emptyList()) }
+    }
+
+    fun confirmMovePendingToRecycleBin() {
+        val targets = _uiState.value.pendingDeleteTargets
+        if (targets.isEmpty()) return
+        _uiState.update { it.copy(pendingDeleteTargets = emptyList(), isLoading = true) }
 
         viewModelScope.launch {
-            _uiState.update { it.copy(isLoading = true) }
-            var deletedCount = 0
-            selectedNodes.forEach { node ->
-                val res = fileEngine.deleteFileOrDirectory(node)
-                if (res.isSuccess) deletedCount++
+            val res = fileEngine.moveToRecycleBin(targets)
+            res.fold(
+                onSuccess = { trashedItems ->
+                    val undoOp = if (trashedItems.isNotEmpty()) {
+                        UndoOperation.RestoreRecycleBinItems(
+                            items = trashedItems,
+                            summaryLabel = "Moved ${trashedItems.size} item(s) to Recycle Bin"
+                        )
+                    } else null
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            selectedFilePaths = emptySet(),
+                            recycleBinItems = fileEngine.listRecycleBinItems(),
+                            lastUndoOperation = undoOp
+                        )
+                    }
+                    repository.recordLog(
+                        operationType = "RECYCLE_BIN_MOVE",
+                        targetPath = targets.first().path,
+                        isError = false,
+                        summary = "Moved ${trashedItems.size} item(s) to Recycle Bin"
+                    )
+                    refreshCurrentDirectory()
+                    runStorageAnalyzer()
+                    showStatus("Moved ${trashedItems.size} item(s) to Recycle Bin.")
+                },
+                onFailure = { err ->
+                    _uiState.update { it.copy(isLoading = false) }
+                    reportDiagnosticError("Move to Recycle Bin", targets.first().path, err)
+                }
+            )
+        }
+    }
+
+    fun confirmPermanentlyShredPending() {
+        val targets = _uiState.value.pendingDeleteTargets
+        if (targets.isEmpty()) return
+        _uiState.update { it.copy(pendingDeleteTargets = emptyList(), isLoading = true) }
+
+        viewModelScope.launch {
+            val res = fileEngine.permanentlyShredNodes(targets)
+            res.fold(
+                onSuccess = { count ->
+                    _uiState.update { it.copy(isLoading = false, selectedFilePaths = emptySet()) }
+                    repository.recordLog(
+                        operationType = "PERMANENT_SHRED",
+                        targetPath = targets.first().path,
+                        isError = false,
+                        summary = "Permanently zero-shredded $count item(s)"
+                    )
+                    refreshCurrentDirectory()
+                    runStorageAnalyzer()
+                    showStatus("Permanently zero-shredded $count item(s).")
+                },
+                onFailure = { err ->
+                    _uiState.update { it.copy(isLoading = false) }
+                    reportDiagnosticError("Permanent File Shred", targets.first().path, err)
+                }
+            )
+        }
+    }
+
+    fun toggleRecycleBinSheet(show: Boolean) {
+        _uiState.update {
+            it.copy(
+                showRecycleBinSheet = show,
+                recycleBinItems = fileEngine.listRecycleBinItems()
+            )
+        }
+    }
+
+    fun restoreRecycleBinItem(item: RecycleBinItem) {
+        viewModelScope.launch {
+            val res = fileEngine.restoreFromRecycleBin(item, ConflictPolicy.KEEP_BOTH)
+            res.fold(
+                onSuccess = { restoredNode ->
+                    _uiState.update {
+                        it.copy(recycleBinItems = fileEngine.listRecycleBinItems())
+                    }
+                    refreshCurrentDirectory()
+                    runStorageAnalyzer()
+                    showStatus("Restored '${restoredNode.name}' to original location.")
+                },
+                onFailure = { err ->
+                    reportDiagnosticError("Restore from Recycle Bin", item.originalPath, err)
+                }
+            )
+        }
+    }
+
+    fun permanentlyDeleteRecycleBinItem(item: RecycleBinItem) {
+        viewModelScope.launch {
+            fileEngine.permanentlyShredRecycleBinItem(item.id)
+            _uiState.update {
+                it.copy(recycleBinItems = fileEngine.listRecycleBinItems())
             }
-            _uiState.update { it.copy(isLoading = false, selectedFilePaths = emptySet()) }
-            refreshCurrentDirectory()
-            runStorageAnalyzer()
-            showStatus("Deleted $deletedCount selected item(s).")
+            showStatus("Permanently shredded '${item.originalName}' from Recycle Bin.")
+        }
+    }
+
+    fun emptyAllRecycleBin() {
+        viewModelScope.launch {
+            val res = fileEngine.emptyRecycleBin()
+            res.onSuccess { count ->
+                _uiState.update {
+                    it.copy(recycleBinItems = emptyList())
+                }
+                showStatus("Emptied Recycle Bin ($count item(s) permanently shredded).")
+            }
+        }
+    }
+
+    fun dismissUndoBanner() {
+        _uiState.update { it.copy(lastUndoOperation = null) }
+    }
+
+    fun performLastUndo() {
+        val undoOp = _uiState.value.lastUndoOperation ?: return
+        _uiState.update { it.copy(lastUndoOperation = null, isLoading = true) }
+
+        viewModelScope.launch {
+            try {
+                when (undoOp) {
+                    is UndoOperation.RestoreRecycleBinItems -> {
+                        var restored = 0
+                        for (item in undoOp.items) {
+                            if (fileEngine.restoreFromRecycleBin(item, ConflictPolicy.KEEP_BOTH).isSuccess) {
+                                restored++
+                            }
+                        }
+                        showStatus("Undid delete: Restored $restored item(s) from Recycle Bin.")
+                    }
+                    is UndoOperation.DeleteCreatedPaths -> {
+                        var removed = 0
+                        for (path in undoOp.createdPaths) {
+                            val f = File(path)
+                            if (f.exists() && f.deleteRecursively()) removed++
+                        }
+                        showStatus("Undid copy: Removed $removed copied item(s).")
+                    }
+                    is UndoOperation.ReverseMoveOperation -> {
+                        var movedBack = 0
+                        for ((currentDestPath, originalSrcPath) in undoOp.movedPairs) {
+                            val destFile = File(currentDestPath)
+                            val origParent = File(originalSrcPath).parentFile
+                            if (destFile.exists() && origParent != null) {
+                                val node = with(fileEngine) { destFile.toFileNode() }
+                                if (fileEngine.copyOrMoveBatch(listOf(node), origParent.absolutePath, isMove = true, conflictPolicy = ConflictPolicy.KEEP_BOTH).isSuccess) {
+                                    movedBack++
+                                }
+                            }
+                        }
+                        showStatus("Undid move: Restored $movedBack item(s) to previous folder.")
+                    }
+                    is UndoOperation.ReverseRenameOperation -> {
+                        val currentFile = File(undoOp.currentPath)
+                        if (currentFile.exists()) {
+                            val node = with(fileEngine) { currentFile.toFileNode() }
+                            fileEngine.renameFile(node, undoOp.previousName).getOrThrow()
+                            showStatus("Undid rename: Restored '${undoOp.previousName}'.")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                reportDiagnosticError("Undo Operation", undoOp.summaryLabel, e)
+            } finally {
+                _uiState.update {
+                    it.copy(
+                        isLoading = false,
+                        recycleBinItems = fileEngine.listRecycleBinItems()
+                    )
+                }
+                refreshCurrentDirectory()
+                runStorageAnalyzer()
+            }
         }
     }
 
@@ -505,7 +728,16 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
             )
             res.fold(
                 onSuccess = { zipNode ->
-                    _uiState.update { it.copy(isLoading = false, selectedFilePaths = emptySet()) }
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            selectedFilePaths = emptySet(),
+                            lastUndoOperation = UndoOperation.DeleteCreatedPaths(
+                                createdPaths = listOf(zipNode.path),
+                                summaryLabel = "Created archive '${zipNode.name}'"
+                            )
+                        )
+                    }
                     refreshCurrentDirectory()
                     showStatus("Created ZIP Archive '${zipNode.name}' (${LumaFormatUtils.formatBytes(zipNode.sizeBytes)})")
                 },
@@ -739,7 +971,7 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
             res.fold(
                 onSuccess = { count ->
                     refreshCurrentDirectory()
-                    showStatus("Extracted $count files from '${node.name}' with CRC-32 verification.")
+                    showStatus("Extracted $count files from '${node.name}' with Zip-Slip & Zip-Bomb security checks.")
                 },
                 onFailure = { err ->
                     reportDiagnosticError("Extract ZIP Archive", node.path, err)
@@ -788,6 +1020,14 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
             val res = fileEngine.createNewFileOrFolder(currentDir, name, isDirectory, initialContent)
             res.fold(
                 onSuccess = { created ->
+                    _uiState.update {
+                        it.copy(
+                            lastUndoOperation = UndoOperation.DeleteCreatedPaths(
+                                createdPaths = listOf(created.path),
+                                summaryLabel = "Created '${created.name}'"
+                            )
+                        )
+                    }
                     refreshCurrentDirectory()
                     showStatus("Created ${if (isDirectory) "folder" else "file"} '${created.name}'")
                 },
@@ -799,12 +1039,22 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun renameItem(node: FileNode, newName: String) {
+        val oldName = node.name
         viewModelScope.launch {
             val res = fileEngine.renameFile(node, newName)
             res.fold(
                 onSuccess = { renamed ->
+                    _uiState.update {
+                        it.copy(
+                            lastUndoOperation = UndoOperation.ReverseRenameOperation(
+                                currentPath = renamed.path,
+                                previousName = oldName,
+                                summaryLabel = "Renamed '$oldName' to '${renamed.name}'"
+                            )
+                        )
+                    }
                     refreshCurrentDirectory()
-                    showStatus("Renamed '${node.name}' to '${renamed.name}'")
+                    showStatus("Renamed '$oldName' to '${renamed.name}'")
                 },
                 onFailure = { err ->
                     reportDiagnosticError("Rename File", node.path, err)
@@ -814,19 +1064,7 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     fun deleteItem(node: FileNode) {
-        viewModelScope.launch {
-            val res = fileEngine.deleteFileOrDirectory(node)
-            res.fold(
-                onSuccess = {
-                    refreshCurrentDirectory()
-                    runStorageAnalyzer()
-                    showStatus("Deleted '${node.name}'")
-                },
-                onFailure = { err ->
-                    reportDiagnosticError("Delete File/Directory", node.path, err)
-                }
-            )
-        }
+        requestDeleteSingleItem(node)
     }
 
     fun runBatchRegexRename(pattern: String, replacement: String, prefix: String) {
@@ -920,13 +1158,16 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                 },
                 onFailure = { err ->
                     _uiState.update { it.copy(isAnalyzingStorage = false) }
-                    reportDiagnosticError("Storage & Duplicate Analyzer", targetRoot, err)
+                    // Only surface error modal if user is actively on the Analyzer tab
+                    if (_uiState.value.activeTab == LumaTab.ANALYZER) {
+                        reportDiagnosticError("Storage & Duplicate Analyzer", targetRoot, err)
+                    }
                 }
             )
         }
     }
 
-    // ==================== AES-256 PIN / PASSWORD SECURE VAULT (210K PBKDF2) ====================
+    // ==================== AES-256 WRAPPED MASTER DEK SECURE VAULT (210K PBKDF2) ====================
 
     fun setupVaultCredential(
         secret: String,
@@ -951,7 +1192,7 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                         unlockedPinInMemory = secret,
                         recoveryQuestion = cryptoEngine.getRecoveryQuestion(),
                         vaultAuthError = null,
-                        statusBannerMessage = "AES-256-GCM Secure Vault configured (${authMode.label} • 210,000 PBKDF2 iterations)."
+                        statusBannerMessage = "AES-256-GCM Secure Vault configured with Wrapped 256-Bit Master DEK (${authMode.label})."
                     )
                 }
             },
@@ -968,7 +1209,7 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                     isVaultUnlocked = true,
                     unlockedPinInMemory = secret,
                     vaultAuthError = null,
-                    statusBannerMessage = "Secure Vault Unlocked (210k PBKDF2 Verified)."
+                    statusBannerMessage = "Secure Vault Unlocked (256-Bit Master DEK Unwrapped)."
                 )
             }
         } else {
@@ -986,7 +1227,7 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                 isVaultUnlocked = false,
                 unlockedPinInMemory = "",
                 vaultAuthError = null,
-                statusBannerMessage = "Secure Vault Locked. In-memory key wiped."
+                statusBannerMessage = "Secure Vault Locked. In-memory Master DEK wiped."
             )
         }
     }
@@ -1006,12 +1247,12 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                     isVaultUnlocked = true,
                     unlockedPinInMemory = newSecret,
                     vaultAuthError = null,
-                    statusBannerMessage = "Vault ${newMode.label} reset and unlocked."
+                    statusBannerMessage = "Master DEK unwrapped & re-keyed with new ${newMode.label}. All existing vault files unlocked!"
                 )
             }
         } else {
             _uiState.update {
-                it.copy(vaultAuthError = "Recovery Answer Mismatch: Unable to reset credential.")
+                it.copy(vaultAuthError = "Recovery Answer Mismatch: Unable to unwrap 256-bit Master DEK.")
             }
         }
     }
@@ -1090,33 +1331,130 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
         }
     }
 
-    // ==================== MULTI-THREADED DOWNLOAD MANAGER ====================
+    // ==================== PERSISTENT RESUMABLE DOWNLOADER & LOSSLESS STREAM MUXER ====================
 
-    fun enqueueDownload(url: String, customFileName: String, threads: Int) {
+    fun inspectMediaUrl(url: String) {
         val cleanUrl = url.trim()
         if (cleanUrl.isBlank()) return
-        val fallbackName = cleanUrl.substringAfterLast('/').substringBefore('?').ifBlank {
-            "download_${System.currentTimeMillis()}.bin"
+        _uiState.update { it.copy(isResolvingMediaUrl = true) }
+        viewModelScope.launch {
+            val res = downloadEngine.resolveMediaStreamManifest(cleanUrl)
+            res.fold(
+                onSuccess = { manifest ->
+                    _uiState.update {
+                        it.copy(
+                            isResolvingMediaUrl = false,
+                            resolvedMediaManifest = manifest,
+                            selectedStreamVariantId = manifest.recommendedVariantId
+                        )
+                    }
+                    showStatus("Resolved ${manifest.platformName}: '${manifest.title}' (${manifest.variants.size} stream option(s))")
+                },
+                onFailure = { err ->
+                    _uiState.update { it.copy(isResolvingMediaUrl = false) }
+                    reportDiagnosticError("Resolve Media & Stream Format", cleanUrl, err)
+                }
+            )
         }
-        val finalName = customFileName.trim().ifBlank { fallbackName }
-        val downloadsDir = File(fileEngine.lumaWorkspaceDir, "Downloads").apply { mkdirs() }
-        val destFile = File(downloadsDir, finalName)
+    }
+
+    fun selectMediaStreamVariant(variantId: String) {
+        _uiState.update { it.copy(selectedStreamVariantId = variantId) }
+    }
+
+    fun clearResolvedMediaManifest() {
+        _uiState.update { it.copy(resolvedMediaManifest = null, selectedStreamVariantId = "") }
+    }
+
+    fun enqueueDownload(
+        url: String,
+        customFileName: String,
+        threads: Int,
+        customUserAgent: String = "",
+        expectedSha256: String = "",
+        selectedVariantId: String = ""
+    ) {
+        val cleanUrl = url.trim()
+        if (cleanUrl.isBlank()) return
 
         viewModelScope.launch {
+            _uiState.update { it.copy(isResolvingMediaUrl = true) }
+            val existingManifest = _uiState.value.resolvedMediaManifest?.takeIf { it.sourceUrl == cleanUrl }
+            val manifest = existingManifest
+                ?: downloadEngine.resolveMediaStreamManifest(cleanUrl).getOrNull()
+
+            val chosenVariant = if (manifest != null) {
+                val targetId = selectedVariantId.ifBlank { _uiState.value.selectedStreamVariantId }
+                manifest.variants.firstOrNull { it.variantId == targetId }
+                    ?: FastDownloadEngine.selectBestStreamVariant(manifest.variants)
+            } else null
+
+            val effectiveStreamUrl = chosenVariant?.videoStreamUrl ?: cleanUrl
+            val effectiveAudioUrl = chosenVariant?.audioStreamUrl ?: ""
+            val creatorAttr = manifest?.creatorAttribution ?: ""
+
+            val autoFileName = when {
+                customFileName.isNotBlank() -> {
+                    val trimmed = customFileName.trim()
+                    val ext = chosenVariant?.containerExtension ?: ""
+                    if (ext.isNotBlank() && !trimmed.contains('.')) "$trimmed.$ext" else trimmed
+                }
+                manifest != null && chosenVariant != null -> {
+                    val base = manifest.suggestedFileName.substringBeforeLast('.', manifest.suggestedFileName)
+                    "${base}.${chosenVariant.containerExtension}"
+                }
+                else -> {
+                    cleanUrl.substringAfterLast('/').substringBefore('?').ifBlank {
+                        "download_${System.currentTimeMillis()}.bin"
+                    }
+                }
+            }
+
+            val defaultDownloadsDir = runCatching {
+                val pubDl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if (pubDl != null && (pubDl.exists() || pubDl.mkdirs()) && pubDl.canWrite()) pubDl else null
+            }.getOrNull() ?: File(fileEngine.lumaWorkspaceDir, "Downloads").apply { mkdirs() }
+
+            val destFile = File(defaultDownloadsDir, autoFileName)
+            val safeThreads = threads.coerceIn(1, 8)
+
+            // Save persistent resume & stream mux checkpoint sidecar immediately
+            downloadEngine.saveCheckpointSidecar(
+                destFile = destFile,
+                checkpoint = PersistedDownloadCheckpoint(
+                    url = effectiveStreamUrl,
+                    threadCount = safeThreads,
+                    audioStreamUrl = effectiveAudioUrl,
+                    creatorAttribution = creatorAttr,
+                    expectedSha256 = expectedSha256.trim(),
+                    customUserAgent = customUserAgent.trim(),
+                    resolutionLabel = chosenVariant?.resolutionLabel ?: "Original"
+                )
+            )
+
             val task = DownloadTaskEntity(
-                url = cleanUrl,
-                fileName = finalName,
+                url = effectiveStreamUrl,
+                fileName = autoFileName,
                 destinationPath = destFile.absolutePath,
-                totalBytes = 0L,
+                totalBytes = chosenVariant?.estimatedSizeBytes?.coerceAtLeast(0L) ?: 0L,
                 downloadedBytes = 0L,
                 status = "QUEUED",
-                threadCount = threads.coerceIn(1, 4)
+                threadCount = safeThreads,
+                sha256Checksum = expectedSha256.trim()
             )
             val taskId = repository.addDownloadTask(task)
+            _uiState.update {
+                it.copy(
+                    isResolvingMediaUrl = false,
+                    resolvedMediaManifest = null,
+                    selectedStreamVariantId = ""
+                )
+            }
             downloadEngine.startOrResumeDownload(taskId) { diagnosticError ->
                 _uiState.update { it.copy(activeDiagnosticError = diagnosticError) }
             }
-            showStatus("Started $threads-thread download for '$finalName'")
+            val qualityBadge = chosenVariant?.resolutionLabel?.let { " [$it]" } ?: ""
+            showStatus("Queued '$autoFileName'$qualityBadge ($safeThreads threads)")
         }
     }
 
@@ -1128,6 +1466,13 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
         downloadEngine.startOrResumeDownload(taskId) { diagnosticError ->
             _uiState.update { it.copy(activeDiagnosticError = diagnosticError) }
         }
+    }
+
+    fun recoverPersistentDownloads() {
+        downloadEngine.recoverPersistentQueueOnLaunch { diagnosticError ->
+            _uiState.update { it.copy(activeDiagnosticError = diagnosticError) }
+        }
+        showStatus("Checked persistent download queue & resumed unfinished transfers.")
     }
 
     fun deleteDownloadTask(task: DownloadTaskEntity, deleteFileFromDisk: Boolean) {

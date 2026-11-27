@@ -1,6 +1,7 @@
 package com.example.data.local
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 
 class LumaRepository(private val dao: LumaDao) {
     val vaultItems: Flow<List<VaultItemEntity>> = dao.getAllVaultItems()
@@ -11,6 +12,7 @@ class LumaRepository(private val dao: LumaDao) {
     suspend fun addVaultItem(item: VaultItemEntity): Long = dao.insertVaultItem(item)
     suspend fun removeVaultItem(id: Long) = dao.deleteVaultItemById(id)
 
+    suspend fun getAllDownloadsSnapshot(): List<DownloadTaskEntity> = downloadTasks.first()
     suspend fun addDownloadTask(task: DownloadTaskEntity): Long = dao.insertDownloadTask(task)
     suspend fun getDownloadTask(id: Long): DownloadTaskEntity? = dao.getDownloadTaskById(id)
     suspend fun updateDownloadTask(task: DownloadTaskEntity) = dao.updateDownloadTask(task)

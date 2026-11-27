@@ -104,8 +104,8 @@ private fun VaultCredentialSetupPane(
 ) {
     var selectedMode by remember { mutableStateOf(VaultAuthMode.PIN_4) }
     var enteredSecret by remember { mutableStateOf("") }
-    var recoveryQuestion by remember { mutableStateOf("What is your favorite security keyword?") }
-    var recoveryAnswer by remember { mutableStateOf("LumaVault") }
+    var recoveryQuestion by remember { mutableStateOf("What is your security recovery keyword?") }
+    var recoveryAnswer by remember { mutableStateOf("") }
 
     val targetPinLength = when (selectedMode) {
         VaultAuthMode.PIN_4 -> 4
@@ -117,7 +117,7 @@ private fun VaultCredentialSetupPane(
         VaultAuthMode.PIN_4 -> enteredSecret.length == 4 && enteredSecret.all { it.isDigit() }
         VaultAuthMode.PIN_6 -> enteredSecret.length == 6 && enteredSecret.all { it.isDigit() }
         VaultAuthMode.ALPHANUMERIC_PASSWORD -> enteredSecret.length >= 6
-    }
+    } && recoveryAnswer.trim().length >= 3
 
     LazyColumn(
         modifier = Modifier
@@ -156,7 +156,7 @@ private fun VaultCredentialSetupPane(
                 shape = RoundedCornerShape(10.dp)
             ) {
                 Text(
-                    text = "210,000 PBKDF2-HMAC-SHA256 • Isolated noBackupFilesDir • Opaque UUID (.lvault) • Zero-Overwrite Shredding",
+                    text = "Wrapped 256-Bit Master DEK • 210,000 PBKDF2-HMAC-SHA256 • Opaque UUID (.lvault) • Lossless Recovery",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSecondaryContainer,
                     textAlign = TextAlign.Center,
@@ -165,7 +165,7 @@ private fun VaultCredentialSetupPane(
             }
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Locked files are moved into app-private non-backed-up storage with randomized UUID names and zero-shredded from public folders so no external file manager can view or recover them.",
+                text = "Your 256-bit Master Data Encryption Key (DEK) is wrapped independently by your PIN/Password and your Recovery Answer. Resetting a forgotten PIN/Password via your Recovery Answer unwraps the Master DEK without losing any locked files.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
@@ -245,7 +245,7 @@ private fun VaultCredentialSetupPane(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Text(
-                        text = "Credential Recovery Security Question",
+                        text = "Master DEK Recovery Key-Wrapping Question",
                         style = MaterialTheme.typography.titleSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -259,9 +259,12 @@ private fun VaultCredentialSetupPane(
                     OutlinedTextField(
                         value = recoveryAnswer,
                         onValueChange = { recoveryAnswer = it },
+                        placeholder = { Text("Enter recovery answer (3+ chars, wraps Master DEK)") },
                         label = { Text("Recovery Answer") },
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("vault_recovery_answer_setup_input")
                     )
                 }
             }

@@ -1,8 +1,8 @@
-# File Manager (`Luma Files` v1.1.0)
+# File Manager (`Luma Files` v1.2.0)
 
-[![Android CI - File Manager (Luma Files v1.1.0)](https://github.com/YOUR_USERNAME/YOUR_REPO/actions/workflows/android-ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/YOUR_REPO/actions/workflows/android-ci.yml)
+[![Android CI - File Manager (Luma Files v1.2.0)](https://github.com/YOUR_USERNAME/YOUR_REPO/actions/workflows/android-ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/YOUR_REPO/actions/workflows/android-ci.yml)
 
-**File Manager** (internally branded as **Luma Files**) is a lossless Android file workstation, multi-format studio editor, isolated **AES-256-GCM Safe Folder Vault**, and verified multi-threaded HTTP Range download engine built with **Kotlin** and **Jetpack Compose (Material 3)**.
+**File Manager** (`com.lumafiles.filemanager`, branded as **Luma Files**) is a professional Android file workstation, View-First multi-format studio editor, **Wrapped 256-Bit Master DEK AES-256-GCM Safe Vault**, Recycle Bin & Undo manager, and persistent multi-threaded stream & file downloader built with **Kotlin** and **Jetpack Compose (Material 3)**.
 
 ---
 
@@ -13,48 +13,43 @@ Every push to `main` or `master` automatically builds and publishes the installa
 ### Option 1: Direct APK Download from **GitHub Releases** (Easiest on Phone)
 1. Open your GitHub repository page.
 2. Tap **Releases** (on the right sidebar on desktop, or under the repository info header on mobile).
-3. Under the latest **`v1.1.x`** release, tap **`LumaFiles-FileManager-v1.1.0.apk`** under **Assets** to download and install the `.apk` directly on your Android device.
+3. Under the latest **`v1.2.x`** release, tap **`LumaFiles-FileManager-v1.2.0.apk`** under **Assets** to download and install the `.apk` directly on your Android device.
 
 ### Option 2: Download from **GitHub Actions** Workflow Summary
 1. Open the **Actions** tab in your GitHub repository.
 2. Tap the latest green workflow run (**Build APK, Run Engine Tests & Publish Release**).
-3. Scroll to the **Artifacts** section at the bottom and download **`LumaFiles-FileManager-v1.1.0-APK`**.
-
-> **Troubleshooting GitHub Release Permissions**: If the `Publish Direct APK to GitHub Releases` step ever reports a `403` permission error on a new repository, go to your GitHub repo **Settings -> Actions -> General -> Workflow permissions**, select **Read and write permissions**, and save.
+3. Scroll to the **Artifacts** section at the bottom and download **`LumaFiles-FileManager-v1.2.0-APK`**.
 
 ---
 
-## What's New in v1.1.0
+## What's New in v1.2.0
 
-### 1. Default Internal Storage Root & Remembered Permission Onboarding
-- **Internal Shared Storage Default**: Opens directly into **Internal Shared Storage (`/storage/emulated/0`)** by default whenever storage access is granted, with instant volume chips for **Internal Storage**, **Removable SD Cards**, **SAF Mounts**, and the **Luma Sample Studio**.
-- **One-Time Permission Setup**: On first launch, a clean **Storage & Permission Setup** modal asks once for All Files Access or SAF mounting and remembers your decision so access control banners don't clutter the interface on every launch.
+### 1. ZIP Extraction & ZIP Creation Security Hardening
+- **Canonical `Zip-Slip` & `Zip-Bomb` Protection**: Rejects any archive entry containing `..`, leading `/` or `\`, or resolving outside `destDir.canonicalPath + File.separator`, and enforces strict entry count (`50,000`), total size (`2 GB`), and compression-ratio (`100:1`) limits.
+- **ZIP Creation Self-Inclusion & Cycle Protection**: Automatically excludes the output `.zip` file and its `.tmp` staging file when creating an archive inside the source directory, tracks active canonical directory branches to prevent symlink loops, and commits atomically.
 
-### 2. Cross-Volume Copy, Move & Batch Operations Engine
-- **Floating Multi-Select & Clipboard Action Dock**: Select multiple files and directories across **Internal Shared Storage**, **Removable SD Cards**, and **Storage Access Framework (`content://` SAF)** trees.
-- **Batch Actions**:
-  - **Copy & Move (Cut)** with recursive directory support and cross-volume stream fallback when moving across physical storage boundaries.
-  - **Conflict Resolution Policies**: Choose **Keep Both (Auto-Rename)**, **Overwrite**, or **Skip** directly from the floating paste dock.
-  - **Batch Compress to `.zip`** and **Batch Lock to AES-256 Safe Vault**.
+### 2. Recursive Copy/Move Safety, Atomic Overwrite & Unreadable Directory Guarantees
+- **Self/Descendant Guard**: Prevents copying or moving any directory into itself or any of its descendants.
+- **Verified Move Deletion**: Confirms `!sourceFile.exists()` before reporting a successful move or unlinking source trees.
+- **Atomic Temporary File Replacement**: Writes overwrites to a sibling `.luma_atomic_<uuid>.tmp` file with `FileDescriptor.sync()` before atomically replacing the target file.
+- **Strict Unreadable Directory Handling**: Never silently treats an unreadable directory (`!dir.canRead()` or `dir.listFiles() == null`) as an empty directory—throws an explicit `IOException` with root-cause diagnostics.
 
-### 3. Hardened AES-256-GCM Safe Folder Vault (Zero External Visibility)
-- **210,000-Iteration PBKDF2-HMAC-SHA256**: Supports **4-Digit PIN**, **6-Digit High-Entropy PIN**, or **Alphanumeric Master Password** derived with **210,000 iterations** and a **256-bit (32-byte) cryptographic salt**.
-- **Complete Isolation from External File Managers**:
-  - Encrypted files are stored inside `context.noBackupFilesDir/.luma_vault_v11/` with a `.nomedia` sentinel and **opaque randomized UUID filenames (`<uuid>.lvault`)** so no filename or content is ever visible to external file managers or media scanners.
-  - Original source files are **zero-overwritten (`shredAndDeleteFile`)** and flushed via `FileDescriptor.sync()` before unlinking.
-  - Explicit cloud and device-transfer exclusions are enforced in `res/xml/backup_rules.xml` and `res/xml/data_extraction_rules.xml`.
+### 3. Wrapped 256-Bit Master DEK Vault & Lossless Password Recovery
+- **Envelope Key-Wrapping Architecture**: A cryptographically random **256-bit Master Data Encryption Key (DEK)** derives per-file subkeys and is independently wrapped (AES-256-GCM) by `PrimaryKEK` (210,000-iteration PBKDF2-HMAC-SHA256 from your PIN/Password) and `RecoveryKEK` (210,000-iteration PBKDF2-HMAC-SHA256 from your Recovery Answer).
+- **Zero-Data-Loss Password Reset**: Resetting a forgotten PIN or password with your Recovery Answer unwraps the 256-bit Master DEK and re-wraps it under your new credential—unlocking 100% of previously encrypted `.lvault` files without data loss.
 
-### 4. W3C DOM `.docx` Editing & Power-User Built-In Lossless Studios
-- **W3C DOM Word `.docx` Editor**: Parses `word/document.xml` into a full W3C DOM tree and mutates `<w:t>` text runs in-place while preserving `<w:pPr>`, `<w:pStyle>`, `<w:rPr>` formatting runs, `word/styles.xml`, tables, and relationships.
-- **SQLite Database Browser (`.db`, `.sqlite`, `.sqlite3`)**: Inspect tables, browse rows in a scrollable data grid, and execute custom SQL queries (`SELECT`, `INSERT`, `UPDATE`).
-- **CSV & TSV Interactive Spreadsheet Grid Editor**: Edit cells and column headers inline, add rows, and save RFC-4180 compliant spreadsheets losslessly.
-- **APK Package Inspector (`.apk`)**: Inspect package name, version code/name, Min/Target SDK levels, declared `<uses-permission>` entries, activities, `.dex` bytecode count, and `SHA-256` signature digest.
-- **JSON / XML / YAML Validator & Pretty-Formatter**: One-tap syntax validation and 2-space pretty indentation inside the Code Studio.
-- **PDF Renderer, ZIP Archive Manager, Lossless Media Player & Raw Hex Byte Patcher**.
+### 4. Recycle Bin & One-Tap Undo System
+- **Delete Choice Prompt**: Every delete prompts you to choose between **Move to Recycle Bin (Undoable)** or **Permanent Zero-Overwrite Shred**.
+- **One-Tap Undo Banner**: Instantly undo Recycle Bin moves, Copy, Move, Rename, and File/Folder creation operations.
 
-### 5. Verified Multi-Threaded HTTP Range Download Engine
-- **Strict `Content-Range` Validation**: Validates HTTP `206 Partial Content` and `Content-Range: bytes <start>-<end>/<total>` headers before writing to `RandomAccessFile` offsets, automatically falling back to a single-stream download if a server returns `200 OK`.
-- **Post-Download Integrity Verification**: Verifies exact byte length and computes the full file **MD5** and **SHA-256** checksums upon completion.
+### 5. Persistent Resumable Downloader & Lossless Audio+Video Stream Merger
+- **Genuine HTTP `Range` + `If-Range` Resume & Persistent Checkpoints**: Persists per-segment `.segN.part` byte offsets and `.luma_resume.tsv` metadata so paused or interrupted downloads resume from the exact byte offset on app launch.
+- **Multi-Platform Highest-Quality Stream Resolution**: Resolves direct links and social video streams (YouTube, TikTok, Instagram, Facebook, X/Twitter, Vimeo), automatically selecting the highest original watermark-free resolution and best audio stream, and losslessly muxing separate video+audio tracks via Android's `MediaExtractor` + `MediaMuxer` while preserving creator attribution.
+- **Default vs. Advanced Mode**: Default Mode handles format and quality selection automatically in one tap; Advanced Mode unlocks manual stream/resolution/codec/bitrate/audio selection, 1–8 thread tuning, and SHA-256 verification.
+
+### 6. View-First Studio Opening & Clean Production UI
+- **View Mode First**: All built-in studios (`Code/Markdown`, `Word .docx`, `CSV/TSV Grid`, `PDF`, `ZIP`, `Hex`) open in safe read-only **View Mode** first with an explicit **Edit** toggle in the top toolbar.
+- **Production Application ID**: Updated to `com.lumafiles.filemanager` with zero demo files or overlapping text.
 
 ---
 

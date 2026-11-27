@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -36,6 +37,7 @@ import androidx.compose.material.icons.filled.Audiotrack
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FindReplace
 import androidx.compose.material.icons.filled.Memory
 import androidx.compose.material.icons.filled.Pause
@@ -76,6 +78,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -119,6 +122,21 @@ fun StudioEditorModal(
         is StudioContent.ApkInspectorStudio -> studioContent.file
     }
 
+    val supportsEditMode = when (studioContent) {
+        is StudioContent.TextCodeEditor,
+        is StudioContent.DocxEditor,
+        is StudioContent.CsvGridStudio,
+        is StudioContent.HexBinaryStudio,
+        is StudioContent.PdfViewer,
+        is StudioContent.ZipArchiveManager -> true
+        else -> false
+    }
+
+    // View-First File Opening: Always open in View Mode first (isEditMode = false)
+    var isEditMode by remember(activeNode.path, studioContent::class) {
+        mutableStateOf(false)
+    }
+
     Surface(
         modifier = Modifier
             .fillMaxSize()
@@ -135,7 +153,7 @@ fun StudioEditorModal(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = 10.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(
@@ -151,14 +169,65 @@ fun StudioEditorModal(
                         Text(
                             text = activeNode.name,
                             style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        Text(
-                            text = "Luma Studio v1.1 (${activeNode.category.badgeText}) • ${LumaFormatUtils.formatBytes(activeNode.sizeBytes)} • Lossless",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = if (isEditMode) {
+                                    MaterialTheme.colorScheme.tertiaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                }
+                            ) {
+                                Text(
+                                    text = if (isEditMode) "EDIT MODE" else "VIEW MODE",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isEditMode) {
+                                        MaterialTheme.colorScheme.onTertiaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                    },
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                            Text(
+                                text = "${activeNode.category.badgeText} • ${LumaFormatUtils.formatBytes(activeNode.sizeBytes)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+
+                    if (supportsEditMode) {
+                        FilterChip(
+                            selected = isEditMode,
+                            onClick = { isEditMode = !isEditMode },
+                            label = {
+                                Text(
+                                    text = if (isEditMode) "Viewing" else "Edit",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (isEditMode) Icons.Default.Visibility else Icons.Default.Edit,
+                                    contentDescription = if (isEditMode) "Switch to View Mode" else "Switch to Edit Mode",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            },
+                            modifier = Modifier.testTag("studio_toggle_edit_mode_btn")
                         )
                     }
+
                     if (studioContent !is StudioContent.HexBinaryStudio) {
                         IconButton(
                             onClick = { onSwitchToHex(activeNode, 0L) },
@@ -193,6 +262,8 @@ fun StudioEditorModal(
                 when (studioContent) {
                     is StudioContent.TextCodeEditor -> TextAndMarkdownStudioPane(
                         content = studioContent,
+                        isEditMode = isEditMode,
+                        onEnableEditMode = { isEditMode = true },
                         onSave = { updatedText, encoding ->
                             onSaveText(studioContent.file, updatedText, encoding)
                         },
@@ -203,6 +274,8 @@ fun StudioEditorModal(
 
                     is StudioContent.DocxEditor -> DocxStudioPane(
                         content = studioContent,
+                        isEditMode = isEditMode,
+                        onEnableEditMode = { isEditMode = true },
                         onSave = { paragraphs ->
                             onSaveDocx(studioContent.file, paragraphs)
                         }
@@ -210,6 +283,8 @@ fun StudioEditorModal(
 
                     is StudioContent.CsvGridStudio -> CsvGridStudioPane(
                         content = studioContent,
+                        isEditMode = isEditMode,
+                        onEnableEditMode = { isEditMode = true },
                         onSave = { delimiter, headers, rows ->
                             onSaveCsvGrid(studioContent.file, delimiter, headers, rows)
                         }
@@ -231,12 +306,16 @@ fun StudioEditorModal(
 
                     is StudioContent.PdfViewer -> PdfStudioPane(
                         content = studioContent,
+                        isEditMode = isEditMode,
+                        onEnableEditMode = { isEditMode = true },
                         onChangePage = { newIdx -> onNavigatePdfPage(studioContent.file, newIdx) },
                         onSaveNotes = { notes -> onSavePdfNotes(studioContent.file, notes) }
                     )
 
                     is StudioContent.ZipArchiveManager -> ZipStudioPane(
                         content = studioContent,
+                        isEditMode = isEditMode,
+                        onEnableEditMode = { isEditMode = true },
                         onExtractAll = { onExtractZip(studioContent.file) },
                         onAddEntry = { name, body -> onAddZipEntry(studioContent.file, name, body) }
                     )
@@ -247,6 +326,8 @@ fun StudioEditorModal(
 
                     is StudioContent.HexBinaryStudio -> HexBinaryStudioPane(
                         content = studioContent,
+                        isEditMode = isEditMode,
+                        onEnableEditMode = { isEditMode = true },
                         onChangeWindow = { nextOffset -> onSwitchToHex(studioContent.file, nextOffset) },
                         onPatchByte = { offset, hexVal ->
                             onPatchHexByte(studioContent.file, offset, hexVal, studioContent.windowOffset)
@@ -261,6 +342,8 @@ fun StudioEditorModal(
 @Composable
 private fun TextAndMarkdownStudioPane(
     content: StudioContent.TextCodeEditor,
+    isEditMode: Boolean,
+    onEnableEditMode: () -> Unit,
     onSave: (String, String) -> Unit,
     onFormatStructured: (String, String) -> Unit
 ) {
@@ -268,7 +351,7 @@ private fun TextAndMarkdownStudioPane(
         mutableStateOf(content.textContent)
     }
     var encoding by remember(content.encoding) { mutableStateOf(content.encoding) }
-    var showMarkdownPreview by remember { mutableStateOf(false) }
+    var showMarkdownRenderedInView by remember(content.isMarkdown) { mutableStateOf(content.isMarkdown) }
     var showFindReplace by remember { mutableStateOf(false) }
     var findQuery by remember { mutableStateOf("") }
     var replaceQuery by remember { mutableStateOf("") }
@@ -276,7 +359,7 @@ private fun TextAndMarkdownStudioPane(
     val lineCount = remember(editedText) { editedText.count { it == '\n' } + 1 }
 
     Column(modifier = Modifier.fillMaxSize()) {
-        // Editor Sub-toolbar
+        // Sub-toolbar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -289,13 +372,14 @@ private fun TextAndMarkdownStudioPane(
                 modifier = Modifier
                     .weight(1f)
                     .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                if (content.isMarkdown) {
+                if (content.isMarkdown && !isEditMode) {
                     FilterChip(
-                        selected = showMarkdownPreview,
-                        onClick = { showMarkdownPreview = !showMarkdownPreview },
-                        label = { Text(if (showMarkdownPreview) "Edit Source" else "Markdown Preview") },
+                        selected = showMarkdownRenderedInView,
+                        onClick = { showMarkdownRenderedInView = !showMarkdownRenderedInView },
+                        label = { Text(if (showMarkdownRenderedInView) "Raw Source" else "Rendered Markdown") },
                         leadingIcon = {
                             Icon(Icons.Default.Visibility, contentDescription = null, modifier = Modifier.size(16.dp))
                         }
@@ -312,25 +396,38 @@ private fun TextAndMarkdownStudioPane(
                         modifier = Modifier.testTag("format_structured_text_btn")
                     )
                 }
-                FilterChip(
-                    selected = showFindReplace,
-                    onClick = { showFindReplace = !showFindReplace },
-                    label = { Text("Find & Replace") },
-                    leadingIcon = {
-                        Icon(Icons.Default.FindReplace, contentDescription = null, modifier = Modifier.size(16.dp))
-                    }
-                )
+                if (isEditMode) {
+                    FilterChip(
+                        selected = showFindReplace,
+                        onClick = { showFindReplace = !showFindReplace },
+                        label = { Text("Find & Replace") },
+                        leadingIcon = {
+                            Icon(Icons.Default.FindReplace, contentDescription = null, modifier = Modifier.size(16.dp))
+                        }
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.width(8.dp))
 
-            Button(
-                onClick = { onSave(editedText, encoding) },
-                modifier = Modifier.testTag("save_text_studio_btn")
-            ) {
-                Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("Save Lossless")
+            if (!isEditMode) {
+                Button(
+                    onClick = onEnableEditMode,
+                    modifier = Modifier.testTag("enable_text_edit_mode_btn")
+                ) {
+                    Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Edit File")
+                }
+            } else {
+                Button(
+                    onClick = { onSave(editedText, encoding) },
+                    modifier = Modifier.testTag("save_text_studio_btn")
+                ) {
+                    Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Save Lossless")
+                }
             }
         }
 
@@ -359,7 +456,7 @@ private fun TextAndMarkdownStudioPane(
             }
         }
 
-        if (showFindReplace) {
+        if (isEditMode && showFindReplace) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -402,13 +499,13 @@ private fun TextAndMarkdownStudioPane(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(
-                text = "Lines: $lineCount • Chars: ${editedText.length} • Encoding: $encoding",
+                text = "${if (isEditMode) "Editing" else "Read-Only View"} • Lines: $lineCount • Chars: ${editedText.length} • Encoding: $encoding",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             if (content.isTruncatedPreview) {
                 Text(
-                    text = "512KB Stream Window Active",
+                    text = "512KB Stream Window",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.tertiary
                 )
@@ -417,38 +514,80 @@ private fun TextAndMarkdownStudioPane(
 
         HorizontalDivider()
 
-        if (showMarkdownPreview && content.isMarkdown) {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                editedText.lines().forEach { line ->
-                    when {
-                        line.startsWith("# ") -> Text(
-                            text = line.removePrefix("# "),
-                            style = MaterialTheme.typography.headlineMedium,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        line.startsWith("## ") -> Text(
-                            text = line.removePrefix("## "),
-                            style = MaterialTheme.typography.titleLarge,
-                            color = MaterialTheme.colorScheme.secondary
-                        )
-                        line.startsWith("- ") -> Row {
-                            Text("• ", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
-                            Text(line.removePrefix("- "), style = MaterialTheme.typography.bodyLarge)
+        if (!isEditMode && showMarkdownRenderedInView && content.isMarkdown) {
+            SelectionContainer {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    editedText.lines().forEach { line ->
+                        when {
+                            line.startsWith("# ") -> Text(
+                                text = line.removePrefix("# "),
+                                style = MaterialTheme.typography.headlineMedium,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            line.startsWith("## ") -> Text(
+                                text = line.removePrefix("## "),
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                            line.startsWith("- ") -> Row {
+                                Text("• ", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                Text(line.removePrefix("- "), style = MaterialTheme.typography.bodyLarge)
+                            }
+                            else -> Text(
+                                text = line,
+                                style = MaterialTheme.typography.bodyMedium
+                            )
                         }
-                        else -> Text(
-                            text = line,
-                            style = MaterialTheme.typography.bodyMedium
-                        )
                     }
                 }
             }
+        } else if (!isEditMode) {
+            // Read-Only View Mode with Line Numbers
+            SelectionContainer {
+                Row(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .padding(end = 10.dp)
+                            .width(36.dp),
+                        horizontalAlignment = Alignment.End
+                    ) {
+                        for (i in 1..lineCount.coerceAtMost(999)) {
+                            Text(
+                                text = "$i",
+                                fontFamily = JetBrainsMonoFontFamily,
+                                fontSize = 13.sp,
+                                lineHeight = 20.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
+                            )
+                        }
+                    }
+                    Text(
+                        text = editedText,
+                        style = TextStyle(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            fontSize = 13.sp,
+                            lineHeight = 20.sp,
+                            color = MaterialTheme.colorScheme.onBackground
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("studio_text_readonly_view")
+                    )
+                }
+            }
         } else {
+            // Active Edit Mode
             Row(
                 modifier = Modifier
                     .fillMaxSize()
@@ -493,6 +632,8 @@ private fun TextAndMarkdownStudioPane(
 @Composable
 private fun DocxStudioPane(
     content: StudioContent.DocxEditor,
+    isEditMode: Boolean,
+    onEnableEditMode: () -> Unit,
     onSave: (List<String>) -> Unit
 ) {
     val paragraphNodes = remember(content.file.path, content.paragraphNodes) {
@@ -519,55 +660,67 @@ private fun DocxStudioPane(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Word OOXML (.docx) W3C DOM Studio",
+                        text = "Word OOXML (.docx) Document Studio",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.primary
                     )
                     Text(
-                        text = "${content.xmlEntriesCount} XML Parts • ${content.preservedStylesCount} Styles (<w:pPr>/<w:rPr> Preserved)",
+                        text = "${content.xmlEntriesCount} XML Parts • ${content.preservedStylesCount} Styles Preserved",
                         style = MaterialTheme.typography.labelSmall
                     )
                 }
-                Button(
-                    onClick = { onSave(paragraphNodes.map { it.text }) },
-                    modifier = Modifier.testTag("save_docx_btn")
-                ) {
-                    Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Save .DOCX")
+                if (!isEditMode) {
+                    Button(
+                        onClick = onEnableEditMode,
+                        modifier = Modifier.testTag("enable_docx_edit_btn")
+                    ) {
+                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Edit .DOCX")
+                    }
+                } else {
+                    Button(
+                        onClick = { onSave(paragraphNodes.map { it.text }) },
+                        modifier = Modifier.testTag("save_docx_btn")
+                    ) {
+                        Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Save .DOCX")
+                    }
                 }
             }
         }
 
-        // Add paragraph row
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = newParagraphText,
-                onValueChange = { newParagraphText = it },
-                label = { Text("Append New OOXML Paragraph (<w:p>)") },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
-            )
-            Button(
-                onClick = {
-                    if (newParagraphText.isNotBlank()) {
-                        paragraphNodes.add(
-                            DocxParagraphNode(
-                                index = paragraphNodes.size,
-                                text = newParagraphText.trim(),
-                                styleId = "BodyText",
-                                hasRunFormatting = false
-                            )
-                        )
-                        newParagraphText = ""
-                    }
-                }
+        if (isEditMode) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.Add, contentDescription = "Add Paragraph")
+                OutlinedTextField(
+                    value = newParagraphText,
+                    onValueChange = { newParagraphText = it },
+                    label = { Text("Append New OOXML Paragraph (<w:p>)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f)
+                )
+                Button(
+                    onClick = {
+                        if (newParagraphText.isNotBlank()) {
+                            paragraphNodes.add(
+                                DocxParagraphNode(
+                                    index = paragraphNodes.size,
+                                    text = newParagraphText.trim(),
+                                    styleId = "BodyText",
+                                    hasRunFormatting = false
+                                )
+                            )
+                            newParagraphText = ""
+                        }
+                    }
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = "Add Paragraph")
+                }
             }
         }
 
@@ -588,7 +741,8 @@ private fun DocxStudioPane(
                         ) {
                             Row(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
                             ) {
                                 Text(
                                     text = "Paragraph #${index + 1}",
@@ -600,27 +754,14 @@ private fun DocxStudioPane(
                                     color = MaterialTheme.colorScheme.primaryContainer
                                 ) {
                                     Text(
-                                        text = "w:pStyle=${node.styleId}",
+                                        text = node.styleId,
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onPrimaryContainer,
                                         modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                                     )
                                 }
-                                if (node.hasRunFormatting) {
-                                    Surface(
-                                        shape = RoundedCornerShape(6.dp),
-                                        color = MaterialTheme.colorScheme.secondaryContainer
-                                    ) {
-                                        Text(
-                                            text = "w:rPr Preserved",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                        )
-                                    }
-                                }
                             }
-                            if (paragraphNodes.size > 1) {
+                            if (isEditMode && paragraphNodes.size > 1) {
                                 IconButton(
                                     onClick = { paragraphNodes.removeAt(index) },
                                     modifier = Modifier.size(28.dp)
@@ -635,13 +776,23 @@ private fun DocxStudioPane(
                             }
                         }
                         Spacer(modifier = Modifier.height(6.dp))
-                        OutlinedTextField(
-                            value = node.text,
-                            onValueChange = { updated ->
-                                paragraphNodes[index] = node.copy(text = updated)
-                            },
-                            modifier = Modifier.fillMaxWidth()
-                        )
+                        if (!isEditMode) {
+                            SelectionContainer {
+                                Text(
+                                    text = node.text,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        } else {
+                            OutlinedTextField(
+                                value = node.text,
+                                onValueChange = { updated ->
+                                    paragraphNodes[index] = node.copy(text = updated)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            )
+                        }
                     }
                 }
             }
@@ -652,6 +803,8 @@ private fun DocxStudioPane(
 @Composable
 private fun CsvGridStudioPane(
     content: StudioContent.CsvGridStudio,
+    isEditMode: Boolean,
+    onEnableEditMode: () -> Unit,
     onSave: (Char, List<String>, List<List<String>>) -> Unit
 ) {
     val headers = remember(content.file.path, content.headers) {
@@ -678,7 +831,10 @@ private fun CsvGridStudioPane(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
                     Icon(
                         imageVector = Icons.Default.TableChart,
                         contentDescription = null,
@@ -687,7 +843,7 @@ private fun CsvGridStudioPane(
                     Spacer(modifier = Modifier.width(8.dp))
                     Column {
                         Text(
-                            text = "Interactive CSV / TSV Spreadsheet Grid",
+                            text = "CSV / TSV Spreadsheet Studio",
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.Bold
                         )
@@ -698,26 +854,37 @@ private fun CsvGridStudioPane(
                     }
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(
-                        onClick = {
-                            rows.add(MutableList(headers.size) { "" })
-                        },
-                        modifier = Modifier.testTag("csv_add_row_btn")
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Row")
-                    }
+                if (!isEditMode) {
                     Button(
-                        onClick = {
-                            onSave(content.delimiter, headers.toList(), rows.map { it.toList() })
-                        },
-                        modifier = Modifier.testTag("save_csv_grid_btn")
+                        onClick = onEnableEditMode,
+                        modifier = Modifier.testTag("enable_csv_edit_btn")
                     ) {
-                        Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(4.dp))
-                        Text("Save Grid")
+                        Text("Edit Grid")
+                    }
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                rows.add(MutableList(headers.size) { "" })
+                            },
+                            modifier = Modifier.testTag("csv_add_row_btn")
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Row")
+                        }
+                        Button(
+                            onClick = {
+                                onSave(content.delimiter, headers.toList(), rows.map { it.toList() })
+                            },
+                            modifier = Modifier.testTag("save_csv_grid_btn")
+                        ) {
+                            Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Save Grid")
+                        }
                     }
                 }
             }
@@ -737,23 +904,36 @@ private fun CsvGridStudioPane(
                         RoundedCornerShape(topStart = 10.dp, topEnd = 10.dp)
                     )
                     .padding(vertical = 8.dp, horizontal = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(modifier = Modifier.width(42.dp), contentAlignment = Alignment.Center) {
                     Text("#", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
                 }
                 headers.forEachIndexed { colIndex, colName ->
-                    OutlinedTextField(
-                        value = colName,
-                        onValueChange = { headers[colIndex] = it },
-                        singleLine = true,
-                        textStyle = TextStyle(
+                    if (!isEditMode) {
+                        Text(
+                            text = colName,
+                            style = MaterialTheme.typography.labelLarge,
                             fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        ),
-                        modifier = Modifier.width(150.dp)
-                    )
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier
+                                .width(150.dp)
+                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                        )
+                    } else {
+                        OutlinedTextField(
+                            value = colName,
+                            onValueChange = { headers[colIndex] = it },
+                            singleLine = true,
+                            textStyle = TextStyle(
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 13.sp,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            ),
+                            modifier = Modifier.width(150.dp)
+                        )
+                    }
                 }
             }
 
@@ -765,7 +945,7 @@ private fun CsvGridStudioPane(
                     Row(
                         modifier = Modifier
                             .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
-                            .padding(horizontal = 8.dp, vertical = 4.dp),
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
@@ -778,21 +958,32 @@ private fun CsvGridStudioPane(
                         }
                         for (colIndex in headers.indices) {
                             val cellVal = rowCells.getOrElse(colIndex) { "" }
-                            OutlinedTextField(
-                                value = cellVal,
-                                onValueChange = { updated ->
-                                    val copy = rowCells.toMutableList()
-                                    while (copy.size <= colIndex) copy.add("")
-                                    copy[colIndex] = updated
-                                    rows[rowIndex] = copy
-                                },
-                                singleLine = true,
-                                textStyle = TextStyle(
+                            if (!isEditMode) {
+                                Text(
+                                    text = cellVal,
                                     fontFamily = JetBrainsMonoFontFamily,
-                                    fontSize = 12.sp
-                                ),
-                                modifier = Modifier.width(150.dp)
-                            )
+                                    fontSize = 12.sp,
+                                    modifier = Modifier
+                                        .width(150.dp)
+                                        .padding(horizontal = 6.dp, vertical = 4.dp)
+                                )
+                            } else {
+                                OutlinedTextField(
+                                    value = cellVal,
+                                    onValueChange = { updated ->
+                                        val copy = rowCells.toMutableList()
+                                        while (copy.size <= colIndex) copy.add("")
+                                        copy[colIndex] = updated
+                                        rows[rowIndex] = copy
+                                    },
+                                    singleLine = true,
+                                    textStyle = TextStyle(
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontSize = 12.sp
+                                    ),
+                                    modifier = Modifier.width(150.dp)
+                                )
+                            }
                         }
                     }
                 }
@@ -969,7 +1160,7 @@ private fun ApkInspectorStudioPane(
                         modifier = Modifier.size(42.dp)
                     )
                     Spacer(modifier = Modifier.width(14.dp))
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = content.file.name,
                             style = MaterialTheme.typography.titleLarge,
@@ -1080,6 +1271,8 @@ private fun ApkInspectorStudioPane(
 @Composable
 private fun PdfStudioPane(
     content: StudioContent.PdfViewer,
+    isEditMode: Boolean,
+    onEnableEditMode: () -> Unit,
     onChangePage: (Int) -> Unit,
     onSaveNotes: (String) -> Unit
 ) {
@@ -1108,7 +1301,7 @@ private fun PdfStudioPane(
             }
 
             Text(
-                text = "Page ${content.currentPageIndex + 1} of ${content.pageCount} (Native High-DPI)",
+                text = "Page ${content.currentPageIndex + 1} of ${content.pageCount}",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.primary
             )
@@ -1148,7 +1341,7 @@ private fun PdfStudioPane(
             }
         }
 
-        // PDF Annotation & Notes Companion Editor
+        // PDF Annotation & Notes Companion
         Card(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
             modifier = Modifier.fillMaxWidth()
@@ -1163,22 +1356,38 @@ private fun PdfStudioPane(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = "PDF Companion Annotations & Notes",
+                        text = "PDF Companion Notes",
                         style = MaterialTheme.typography.titleSmall
                     )
-                    Button(onClick = { onSaveNotes(notes) }) {
-                        Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Save Notes")
+                    if (!isEditMode) {
+                        OutlinedButton(onClick = onEnableEditMode) {
+                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Edit Notes")
+                        }
+                    } else {
+                        Button(onClick = { onSaveNotes(notes) }) {
+                            Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("Save Notes")
+                        }
                     }
                 }
-                OutlinedTextField(
-                    value = notes,
-                    onValueChange = { notes = it },
-                    placeholder = { Text("Add review notes or annotations for this PDF...") },
-                    minLines = 3,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                if (!isEditMode) {
+                    Text(
+                        text = notes.ifBlank { "No notes attached. Tap 'Edit Notes' to add annotations." },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = notes,
+                        onValueChange = { notes = it },
+                        placeholder = { Text("Add review notes or annotations for this PDF...") },
+                        minLines = 3,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         }
     }
@@ -1187,12 +1396,13 @@ private fun PdfStudioPane(
 @Composable
 private fun ZipStudioPane(
     content: StudioContent.ZipArchiveManager,
+    isEditMode: Boolean,
+    onEnableEditMode: () -> Unit,
     onExtractAll: () -> Unit,
     onAddEntry: (String, String) -> Unit
 ) {
-    var newEntryName by remember { mutableStateOf("notes/added_in_luma.txt") }
-    var newEntryContent by remember { mutableStateOf("Added losslessly by Luma Files ZIP Studio.") }
-    var showAddEntryForm by remember { mutableStateOf(false) }
+    var newEntryName by remember { mutableStateOf("") }
+    var newEntryContent by remember { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -1213,7 +1423,7 @@ private fun ZipStudioPane(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "${content.entries.size} Archive Entries",
                             style = MaterialTheme.typography.titleMedium,
@@ -1225,10 +1435,12 @@ private fun ZipStudioPane(
                         )
                     }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(onClick = { showAddEntryForm = !showAddEntryForm }) {
-                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Pack File")
+                        if (!isEditMode) {
+                            OutlinedButton(onClick = onEnableEditMode) {
+                                Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Add Entry")
+                            }
                         }
                         Button(
                             onClick = onExtractAll,
@@ -1241,12 +1453,13 @@ private fun ZipStudioPane(
                     }
                 }
 
-                if (showAddEntryForm) {
+                if (isEditMode) {
                     HorizontalDivider()
                     OutlinedTextField(
                         value = newEntryName,
                         onValueChange = { newEntryName = it },
-                        label = { Text("Entry Path inside ZIP") },
+                        placeholder = { Text("e.g. docs/notes.txt") },
+                        label = { Text("Relative Entry Path inside ZIP") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
@@ -1261,9 +1474,11 @@ private fun ZipStudioPane(
                         onClick = {
                             if (newEntryName.isNotBlank()) {
                                 onAddEntry(newEntryName.trim(), newEntryContent)
-                                showAddEntryForm = false
+                                newEntryName = ""
+                                newEntryContent = ""
                             }
-                        }
+                        },
+                        enabled = newEntryName.isNotBlank()
                     ) {
                         Text("Commit Entry & Repack ZIP")
                     }
@@ -1513,11 +1728,13 @@ private fun ImageStudioPane(content: StudioContent.ImageStudio) {
 @Composable
 private fun HexBinaryStudioPane(
     content: StudioContent.HexBinaryStudio,
+    isEditMode: Boolean,
+    onEnableEditMode: () -> Unit,
     onChangeWindow: (Long) -> Unit,
     onPatchByte: (Long, String) -> Unit
 ) {
-    var patchOffsetHex by remember { mutableStateOf("%X".format(content.windowOffset)) }
-    var patchValueHex by remember { mutableStateOf("4C") }
+    var patchOffsetHex by remember(content.windowOffset) { mutableStateOf("%X".format(content.windowOffset)) }
+    var patchValueHex by remember { mutableStateOf("00") }
 
     Column(
         modifier = Modifier
@@ -1532,19 +1749,34 @@ private fun HexBinaryStudioPane(
         ) {
             Column(
                 modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                Text(
-                    text = "MD5: ${content.md5Hash}",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    style = MaterialTheme.typography.labelSmall
-                )
-                Text(
-                    text = "SHA-256: ${content.sha256Hash}",
-                    fontFamily = JetBrainsMonoFontFamily,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "MD5: ${content.md5Hash}",
+                            fontFamily = JetBrainsMonoFontFamily,
+                            style = MaterialTheme.typography.labelSmall
+                        )
+                        Text(
+                            text = "SHA-256: ${content.sha256Hash}",
+                            fontFamily = JetBrainsMonoFontFamily,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    if (!isEditMode) {
+                        OutlinedButton(onClick = onEnableEditMode) {
+                            Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("Edit Bytes")
+                        }
+                    }
+                }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -1570,36 +1802,38 @@ private fun HexBinaryStudioPane(
             }
         }
 
-        // Direct Single-Byte Hex Patch Bar
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            OutlinedTextField(
-                value = patchOffsetHex,
-                onValueChange = { patchOffsetHex = it },
-                label = { Text("Byte Offset (Hex)") },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
-            )
-            OutlinedTextField(
-                value = patchValueHex,
-                onValueChange = { if (it.length <= 2) patchValueHex = it },
-                label = { Text("New Byte (00-FF)") },
-                singleLine = true,
-                modifier = Modifier.weight(1f)
-            )
-            Button(
-                onClick = {
-                    val offsetLong = patchOffsetHex.trim().removePrefix("0x").toLongOrNull(16)
-                    if (offsetLong != null && patchValueHex.isNotBlank()) {
-                        onPatchByte(offsetLong, patchValueHex)
-                    }
-                },
-                modifier = Modifier.testTag("patch_hex_byte_btn")
+        // Direct Single-Byte Hex Patch Bar (Only shown in Edit Mode)
+        if (isEditMode) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Text("Patch Byte")
+                OutlinedTextField(
+                    value = patchOffsetHex,
+                    onValueChange = { patchOffsetHex = it },
+                    label = { Text("Byte Offset (Hex)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f)
+                )
+                OutlinedTextField(
+                    value = patchValueHex,
+                    onValueChange = { if (it.length <= 2) patchValueHex = it },
+                    label = { Text("New Byte (00-FF)") },
+                    singleLine = true,
+                    modifier = Modifier.weight(1f)
+                )
+                Button(
+                    onClick = {
+                        val offsetLong = patchOffsetHex.trim().removePrefix("0x").toLongOrNull(16)
+                        if (offsetLong != null && patchValueHex.isNotBlank()) {
+                            onPatchByte(offsetLong, patchValueHex)
+                        }
+                    },
+                    modifier = Modifier.testTag("patch_hex_byte_btn")
+                ) {
+                    Text("Patch Byte")
+                }
             }
         }
 

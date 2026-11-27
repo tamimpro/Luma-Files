@@ -22,8 +22,7 @@ import java.security.SecureRandom
 import java.util.UUID
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
-import javax.crypto.CipherInputStream
-import javax.crypto.CipherOutputStream
+import javax.crypto.Mac
 import javax.crypto.SecretKeyFactory
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.PBEKeySpec
@@ -56,20 +55,37 @@ class CryptoVaultEngine(
     private var memoryAuthMode: String = VaultAuthMode.PIN_4.name
     private var memoryRecoveryQuestion: String = "What is your favorite security keyword?"
     private var memoryRecoveryHash: String? = null
+    private var memoryRecoverySalt: String? = null
+    private var memoryWrappedDekPrimary: String? = null
+    private var memoryWrappedDekPrimaryIv: String? = null
+    private var memoryWrappedDekRecovery: String? = null
+    private var memoryWrappedDekRecoveryIv: String? = null
 
     companion object {
-        private const val KEY_PIN_HASH = "pin_verification_hash_v11"
-        private const val KEY_PIN_SALT = "pin_verification_salt_v11"
-        private const val KEY_AUTH_MODE = "vault_auth_mode_v11"
-        private const val KEY_RECOVERY_QUESTION = "recovery_question_v11"
-        private const val KEY_RECOVERY_HASH = "recovery_answer_hash_v11"
+        private const val KEY_PIN_HASH = "pin_verification_hash_v12"
+        private const val KEY_PIN_SALT = "pin_verification_salt_v12"
+        private const val KEY_AUTH_MODE = "vault_auth_mode_v12"
+        private const val KEY_RECOVERY_QUESTION = "recovery_question_v12"
+        private const val KEY_RECOVERY_HASH = "recovery_answer_hash_v12"
+        private const val KEY_RECOVERY_SALT = "recovery_salt_v12"
+        private const val KEY_WRAPPED_DEK_PRIMARY = "wrapped_master_dek_primary_v12"
+        private const val KEY_WRAPPED_DEK_PRIMARY_IV = "wrapped_master_dek_primary_iv_v12"
+        private const val KEY_WRAPPED_DEK_RECOVERY = "wrapped_master_dek_recovery_v12"
+        private const val KEY_WRAPPED_DEK_RECOVERY_IV = "wrapped_master_dek_recovery_iv_v12"
         private const val KEY_ONBOARDING_REMEMBERED = "permission_onboarding_remembered_v11"
 
+        // Legacy v1.1 keys for seamless migration
+        private const val LEGACY_KEY_PIN_HASH = "pin_verification_hash_v11"
+        private const val LEGACY_KEY_PIN_SALT = "pin_verification_salt_v11"
+        private const val LEGACY_KEY_AUTH_MODE = "vault_auth_mode_v11"
+
         private const val PBKDF2_ALGO = "PBKDF2WithHmacSHA256"
+        private const val HMAC_SHA256_ALGO = "HmacSHA256"
         private const val AES_GCM_TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
         const val PBKDF2_ITERATIONS = 210_000
         private const val SALT_BYTES = 32 // 256-bit salt
+        private const val DEK_BYTES = 32  // 256-bit Master Data Encryption Key
         private const val IV_BYTES = 12   // 96-bit GCM IV
         private const val BUFFER_SIZE = 64 * 1024
     }
@@ -82,10 +98,14 @@ class CryptoVaultEngine(
     }
 
     fun isPinConfigured(): Boolean =
-        prefs?.contains(KEY_PIN_HASH) ?: (memoryPinHash != null)
+        (prefs?.contains(KEY_PIN_HASH) == true) ||
+            (prefs?.contains(LEGACY_KEY_PIN_HASH) == true) ||
+            (memoryPinHash != null)
 
     fun getConfiguredAuthMode(): VaultAuthMode {
-        val raw = prefs?.getString(KEY_AUTH_MODE, VaultAuthMode.PIN_4.name) ?: memoryAuthMode
+        val raw = prefs?.getString(KEY_AUTH_MODE, null)
+            ?: prefs?.getString(LEGACY_KEY_AUTH_MODE, null)
+            ?: memoryAuthMode
         return runCatching { VaultAuthMode.valueOf(raw) }.getOrDefault(VaultAuthMode.PIN_4)
     }
 
@@ -98,6 +118,32 @@ class CryptoVaultEngine(
     fun getRecoveryQuestion(): String =
         prefs?.getString(KEY_RECOVERY_QUESTION, memoryRecoveryQuestion) ?: memoryRecoveryQuestion
 
+    private fun validateSecretForMode(secret: String, authMode: VaultAuthMode) {
+        when (authMode) {
+            VaultAuthMode.PIN_4 -> {
+                require(secret.length == 4 && secret.all { it.isDigit() }) {
+                    "4-Digit PIN must contain exactly 4 numeric digits (0-9)."
+                }
+            }
+            VaultAuthMode.PIN_6 -> {
+                require(secret.length == 6 && secret.all { it.isDigit() }) {
+                    "6-Digit PIN must contain exactly 6 numeric digits (0-9)."
+                }
+            }
+            VaultAuthMode.ALPHANUMERIC_PASSWORD -> {
+                require(secret.length >= 6) {
+                    "Alphanumeric password must be at least 6 characters long."
+                }
+            }
+        }
+    }
+
+    /**
+     * Initializes the v1.2.0 Wrapped 256-Bit Master DEK architecture:
+     * 1. Generates a cryptographically random 256-bit Master DEK.
+     * 2. Wraps the Master DEK with PrimaryKEK (210k PBKDF2 from user's PIN/Password).
+     * 3. Independently wraps the same Master DEK with RecoveryKEK (210k PBKDF2 from recovery answer).
+     */
     fun setupCredential(
         secret: String,
         authMode: VaultAuthMode,
@@ -105,47 +151,53 @@ class CryptoVaultEngine(
         recoveryAnswer: String
     ): Result<Unit> {
         return try {
-            when (authMode) {
-                VaultAuthMode.PIN_4 -> {
-                    require(secret.length == 4 && secret.all { it.isDigit() }) {
-                        "4-Digit PIN must contain exactly 4 numeric digits (0-9)."
-                    }
-                }
-                VaultAuthMode.PIN_6 -> {
-                    require(secret.length == 6 && secret.all { it.isDigit() }) {
-                        "6-Digit PIN must contain exactly 6 numeric digits (0-9)."
-                    }
-                }
-                VaultAuthMode.ALPHANUMERIC_PASSWORD -> {
-                    require(secret.length >= 6) {
-                        "Alphanumeric password must be at least 6 characters long."
-                    }
-                }
+            validateSecretForMode(secret, authMode)
+            val cleanRecovery = recoveryAnswer.trim().lowercase()
+            require(cleanRecovery.length >= 2) {
+                "Recovery answer must be at least 2 characters so your Master DEK can be safely wrapped for password recovery."
             }
 
-            val salt = ByteArray(SALT_BYTES).also { secureRandom.nextBytes(it) }
-            val verifyHash = deriveKeyBytes(secret, salt, 32).toHex()
-            val cleanRecovery = recoveryAnswer.trim().lowercase()
-            val recoveryHash = if (cleanRecovery.isNotEmpty()) {
-                deriveKeyBytes(cleanRecovery, salt, 32).toHex()
-            } else ""
+            val masterDek = ByteArray(DEK_BYTES).also { secureRandom.nextBytes(it) }
+
+            val primarySalt = ByteArray(SALT_BYTES).also { secureRandom.nextBytes(it) }
+            val primaryKek = deriveKeyBytes(secret, primarySalt, 32)
+            val verifyHash = sha256Hex(primaryKek)
+            val (wrappedPrimaryHex, primaryIvHex) = wrapDek(masterDek, primaryKek)
+
+            val recoverySalt = ByteArray(SALT_BYTES).also { secureRandom.nextBytes(it) }
+            val recoveryKek = deriveKeyBytes(cleanRecovery, recoverySalt, 32)
+            val recoveryHash = sha256Hex(recoveryKek)
+            val (wrappedRecoveryHex, recoveryIvHex) = wrapDek(masterDek, recoveryKek)
 
             val question = recoveryQuestion.ifBlank { "What is your favorite security keyword?" }
             if (prefs != null) {
                 prefs.edit()
                     .putString(KEY_PIN_HASH, verifyHash)
-                    .putString(KEY_PIN_SALT, salt.toHex())
+                    .putString(KEY_PIN_SALT, primarySalt.toHex())
                     .putString(KEY_AUTH_MODE, authMode.name)
                     .putString(KEY_RECOVERY_QUESTION, question)
                     .putString(KEY_RECOVERY_HASH, recoveryHash)
+                    .putString(KEY_RECOVERY_SALT, recoverySalt.toHex())
+                    .putString(KEY_WRAPPED_DEK_PRIMARY, wrappedPrimaryHex)
+                    .putString(KEY_WRAPPED_DEK_PRIMARY_IV, primaryIvHex)
+                    .putString(KEY_WRAPPED_DEK_RECOVERY, wrappedRecoveryHex)
+                    .putString(KEY_WRAPPED_DEK_RECOVERY_IV, recoveryIvHex)
                     .apply()
             } else {
                 memoryPinHash = verifyHash
-                memoryPinSalt = salt.toHex()
+                memoryPinSalt = primarySalt.toHex()
                 memoryAuthMode = authMode.name
                 memoryRecoveryQuestion = question
                 memoryRecoveryHash = recoveryHash
+                memoryRecoverySalt = recoverySalt.toHex()
+                memoryWrappedDekPrimary = wrappedPrimaryHex
+                memoryWrappedDekPrimaryIv = primaryIvHex
+                memoryWrappedDekRecovery = wrappedRecoveryHex
+                memoryWrappedDekRecoveryIv = recoveryIvHex
             }
+            masterDek.fill(0)
+            primaryKek.fill(0)
+            recoveryKek.fill(0)
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -167,37 +219,174 @@ class CryptoVaultEngine(
     }
 
     fun verifyPin(secret: String): Boolean {
-        val storedHash = prefs?.getString(KEY_PIN_HASH, null) ?: memoryPinHash ?: return false
-        val saltHex = prefs?.getString(KEY_PIN_SALT, null) ?: memoryPinSalt ?: return false
-        val salt = saltHex.hexToBytes()
-        val candidateHash = deriveKeyBytes(secret, salt, 32).toHex()
-        return MessageDigest.isEqual(storedHash.toByteArray(), candidateHash.toByteArray())
+        val unwrapped = runCatching { unwrapMasterDekWithSecret(secret) }.getOrNull()
+        if (unwrapped != null) {
+            unwrapped.fill(0)
+            return true
+        }
+        // Fallback check for legacy v1.1 hash
+        val legacyHash = prefs?.getString(LEGACY_KEY_PIN_HASH, null) ?: return false
+        val legacySaltHex = prefs?.getString(LEGACY_KEY_PIN_SALT, null) ?: return false
+        val candidateHash = deriveKeyBytes(secret, legacySaltHex.hexToBytes(), 32).toHex()
+        return MessageDigest.isEqual(legacyHash.toByteArray(), candidateHash.toByteArray())
     }
 
+    /**
+     * Lossless Password Recovery via Wrapped 256-Bit Master DEK:
+     * 1. Derives RecoveryKEK from the recovery answer + recoverySalt (210,000 PBKDF2 iterations).
+     * 2. Unwraps the 256-bit Master DEK using RecoveryKEK.
+     * 3. Derives a fresh PrimaryKEK from the new PIN/Password + fresh 32-byte salt.
+     * 4. Re-wraps the exact same 256-bit Master DEK under the new PrimaryKEK.
+     * All existing encrypted vault files remain 100% accessible without re-encryption or data loss.
+     */
     fun resetPinWithRecovery(
         recoveryAnswer: String,
         newSecret: String,
         newAuthMode: VaultAuthMode = VaultAuthMode.PIN_4
     ): Boolean {
-        val storedRecoveryHash = prefs?.getString(KEY_RECOVERY_HASH, null) ?: memoryRecoveryHash ?: return false
-        val saltHex = prefs?.getString(KEY_PIN_SALT, null) ?: memoryPinSalt ?: return false
-        if (storedRecoveryHash.isBlank()) return false
-        val salt = saltHex.hexToBytes()
-        val candidate = deriveKeyBytes(recoveryAnswer.trim().lowercase(), salt, 32).toHex()
-        if (!MessageDigest.isEqual(storedRecoveryHash.toByteArray(), candidate.toByteArray())) {
-            return false
+        return try {
+            validateSecretForMode(newSecret, newAuthMode)
+            val cleanRecovery = recoveryAnswer.trim().lowercase()
+            if (cleanRecovery.isEmpty()) return false
+
+            val storedRecoveryHash = prefs?.getString(KEY_RECOVERY_HASH, null) ?: memoryRecoveryHash ?: return false
+            val recoverySaltHex = prefs?.getString(KEY_RECOVERY_SALT, null) ?: memoryRecoverySalt ?: return false
+            val wrappedRecoveryHex = prefs?.getString(KEY_WRAPPED_DEK_RECOVERY, null) ?: memoryWrappedDekRecovery ?: return false
+            val recoveryIvHex = prefs?.getString(KEY_WRAPPED_DEK_RECOVERY_IV, null) ?: memoryWrappedDekRecoveryIv ?: return false
+
+            val recoveryKek = deriveKeyBytes(cleanRecovery, recoverySaltHex.hexToBytes(), 32)
+            val candidateRecoveryHash = sha256Hex(recoveryKek)
+            if (!MessageDigest.isEqual(storedRecoveryHash.toByteArray(), candidateRecoveryHash.toByteArray())) {
+                recoveryKek.fill(0)
+                return false
+            }
+
+            // Unwrap the 256-bit Master DEK using RecoveryKEK
+            val masterDek = unwrapDek(wrappedRecoveryHex, recoveryIvHex, recoveryKek)
+            recoveryKek.fill(0)
+
+            // Re-wrap the Master DEK under the user's new PIN / Alphanumeric Password
+            val newPrimarySalt = ByteArray(SALT_BYTES).also { secureRandom.nextBytes(it) }
+            val newPrimaryKek = deriveKeyBytes(newSecret, newPrimarySalt, 32)
+            val newVerifyHash = sha256Hex(newPrimaryKek)
+            val (newWrappedPrimaryHex, newPrimaryIvHex) = wrapDek(masterDek, newPrimaryKek)
+
+            masterDek.fill(0)
+            newPrimaryKek.fill(0)
+
+            if (prefs != null) {
+                prefs.edit()
+                    .putString(KEY_PIN_HASH, newVerifyHash)
+                    .putString(KEY_PIN_SALT, newPrimarySalt.toHex())
+                    .putString(KEY_AUTH_MODE, newAuthMode.name)
+                    .putString(KEY_WRAPPED_DEK_PRIMARY, newWrappedPrimaryHex)
+                    .putString(KEY_WRAPPED_DEK_PRIMARY_IV, newPrimaryIvHex)
+                    .apply()
+            } else {
+                memoryPinHash = newVerifyHash
+                memoryPinSalt = newPrimarySalt.toHex()
+                memoryAuthMode = newAuthMode.name
+                memoryWrappedDekPrimary = newWrappedPrimaryHex
+                memoryWrappedDekPrimaryIv = newPrimaryIvHex
+            }
+            true
+        } catch (_: Exception) {
+            false
         }
-        val newHash = deriveKeyBytes(newSecret, salt, 32).toHex()
-        if (prefs != null) {
-            prefs.edit()
-                .putString(KEY_PIN_HASH, newHash)
-                .putString(KEY_AUTH_MODE, newAuthMode.name)
-                .apply()
-        } else {
-            memoryPinHash = newHash
-            memoryAuthMode = newAuthMode.name
+    }
+
+    /**
+     * Rotates the user's PIN/Password while the vault is unlocked by unwrapping the Master DEK
+     * with the current credential and re-wrapping it with the new credential.
+     */
+    fun rotateCredentialWhileUnlocked(
+        currentSecret: String,
+        newSecret: String,
+        newAuthMode: VaultAuthMode
+    ): Result<Unit> {
+        return try {
+            validateSecretForMode(newSecret, newAuthMode)
+            val masterDek = unwrapMasterDekWithSecret(currentSecret)
+            val newPrimarySalt = ByteArray(SALT_BYTES).also { secureRandom.nextBytes(it) }
+            val newPrimaryKek = deriveKeyBytes(newSecret, newPrimarySalt, 32)
+            val newVerifyHash = sha256Hex(newPrimaryKek)
+            val (newWrappedPrimaryHex, newPrimaryIvHex) = wrapDek(masterDek, newPrimaryKek)
+
+            masterDek.fill(0)
+            newPrimaryKek.fill(0)
+
+            if (prefs != null) {
+                prefs.edit()
+                    .putString(KEY_PIN_HASH, newVerifyHash)
+                    .putString(KEY_PIN_SALT, newPrimarySalt.toHex())
+                    .putString(KEY_AUTH_MODE, newAuthMode.name)
+                    .putString(KEY_WRAPPED_DEK_PRIMARY, newWrappedPrimaryHex)
+                    .putString(KEY_WRAPPED_DEK_PRIMARY_IV, newPrimaryIvHex)
+                    .apply()
+            } else {
+                memoryPinHash = newVerifyHash
+                memoryPinSalt = newPrimarySalt.toHex()
+                memoryAuthMode = newAuthMode.name
+                memoryWrappedDekPrimary = newWrappedPrimaryHex
+                memoryWrappedDekPrimaryIv = newPrimaryIvHex
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
         }
-        return true
+    }
+
+    private fun unwrapMasterDekWithSecret(secret: String): ByteArray {
+        val storedHash = prefs?.getString(KEY_PIN_HASH, null) ?: memoryPinHash
+            ?: throw IllegalStateException("Vault credential is not configured.")
+        val primarySaltHex = prefs?.getString(KEY_PIN_SALT, null) ?: memoryPinSalt
+            ?: throw IllegalStateException("Vault primary salt is missing.")
+        val wrappedPrimaryHex = prefs?.getString(KEY_WRAPPED_DEK_PRIMARY, null) ?: memoryWrappedDekPrimary
+            ?: throw IllegalStateException("Wrapped Master DEK is missing.")
+        val primaryIvHex = prefs?.getString(KEY_WRAPPED_DEK_PRIMARY_IV, null) ?: memoryWrappedDekPrimaryIv
+            ?: throw IllegalStateException("Wrapped Master DEK IV is missing.")
+
+        val primaryKek = deriveKeyBytes(secret, primarySaltHex.hexToBytes(), 32)
+        val candidateHash = sha256Hex(primaryKek)
+        if (!MessageDigest.isEqual(storedHash.toByteArray(), candidateHash.toByteArray())) {
+            primaryKek.fill(0)
+            throw AEADBadTagException("Invalid Vault PIN or Master Password.")
+        }
+        return try {
+            unwrapDek(wrappedPrimaryHex, primaryIvHex, primaryKek)
+        } finally {
+            primaryKek.fill(0)
+        }
+    }
+
+    private fun wrapDek(dekBytes: ByteArray, kekBytes: ByteArray): Pair<String, String> {
+        val iv = ByteArray(IV_BYTES).also { secureRandom.nextBytes(it) }
+        val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
+        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(kekBytes, "AES"), GCMParameterSpec(GCM_TAG_BITS, iv))
+        val wrapped = cipher.doFinal(dekBytes)
+        return Pair(wrapped.toHex(), iv.toHex())
+    }
+
+    private fun unwrapDek(wrappedHex: String, ivHex: String, kekBytes: ByteArray): ByteArray {
+        val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
+        cipher.init(
+            Cipher.DECRYPT_MODE,
+            SecretKeySpec(kekBytes, "AES"),
+            GCMParameterSpec(GCM_TAG_BITS, ivHex.hexToBytes())
+        )
+        return cipher.doFinal(wrappedHex.hexToBytes())
+    }
+
+    /**
+     * Derives a unique per-file 256-bit AES key from the 256-bit Master DEK and a per-file 256-bit random salt
+     * using HMAC-SHA256 (HKDF-Expand).
+     */
+    private fun deriveFileSubKeyFromMasterDek(masterDek: ByteArray, fileSalt: ByteArray): ByteArray {
+        val mac = Mac.getInstance(HMAC_SHA256_ALGO)
+        mac.init(SecretKeySpec(masterDek, HMAC_SHA256_ALGO))
+        mac.update(fileSalt)
+        mac.update("LUMA_VAULT_V12_FILE_SUBKEY".toByteArray(Charsets.UTF_8))
+        return mac.doFinal()
     }
 
     suspend fun encryptFileToVault(
@@ -216,17 +405,28 @@ class CryptoVaultEngine(
                 )
             }
 
-            val salt = ByteArray(SALT_BYTES).also { secureRandom.nextBytes(it) }
+            val fileSalt = ByteArray(SALT_BYTES).also { secureRandom.nextBytes(it) }
             val iv = ByteArray(IV_BYTES).also { secureRandom.nextBytes(it) }
-            val keyBytes = deriveKeyBytes(activeSecret, salt, 32)
-            val secretKey = SecretKeySpec(keyBytes, "AES")
+
+            val masterDek = runCatching { unwrapMasterDekWithSecret(activeSecret) }.getOrNull()
+            val fileKeyBytes = if (masterDek != null) {
+                try {
+                    deriveFileSubKeyFromMasterDek(masterDek, fileSalt)
+                } finally {
+                    masterDek.fill(0)
+                }
+            } else {
+                deriveKeyBytes(activeSecret, fileSalt, 32)
+            }
+            val secretKey = SecretKeySpec(fileKeyBytes, "AES")
 
             val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
             cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, iv))
 
-            // Opaque UUID filename obfuscation: zero filename or extension metadata on disk!
+            // Opaque UUID filename obfuscation: zero filename or extension metadata on disk
             val obfuscatedFileName = "${UUID.randomUUID().toString().replace("-", "")}.lvault"
             val encryptedDest = File(vaultDir, obfuscatedFileName)
+            val tempEncryptedFile = File(vaultDir, ".luma_enc_${UUID.randomUUID()}.tmp")
 
             val sha256Digest = MessageDigest.getInstance("SHA-256")
             var totalReadBytes = 0L
@@ -238,19 +438,34 @@ class CryptoVaultEngine(
                 FileInputStream(sourceFile!!)
             }
 
-            BufferedInputStream(inputStream, BUFFER_SIZE).use { input ->
-                CipherOutputStream(
-                    BufferedOutputStream(FileOutputStream(encryptedDest), BUFFER_SIZE),
-                    cipher
-                ).use { output ->
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    var bytesRead: Int
-                    while (input.read(buffer).also { bytesRead = it } != -1) {
-                        sha256Digest.update(buffer, 0, bytesRead)
-                        output.write(buffer, 0, bytesRead)
-                        totalReadBytes += bytesRead
+            try {
+                BufferedInputStream(inputStream, BUFFER_SIZE).use { input ->
+                    BufferedOutputStream(FileOutputStream(tempEncryptedFile), BUFFER_SIZE).use { output ->
+                        val buffer = ByteArray(BUFFER_SIZE)
+                        var bytesRead: Int
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            sha256Digest.update(buffer, 0, bytesRead)
+                            val encryptedChunk = cipher.update(buffer, 0, bytesRead)
+                            if (encryptedChunk != null && encryptedChunk.isNotEmpty()) {
+                                output.write(encryptedChunk)
+                            }
+                            totalReadBytes += bytesRead
+                        }
+                        val finalChunk = cipher.doFinal()
+                        if (finalChunk != null && finalChunk.isNotEmpty()) {
+                            output.write(finalChunk)
+                        }
+                        output.flush()
                     }
-                    output.flush()
+                }
+                if (!tempEncryptedFile.renameTo(encryptedDest)) {
+                    tempEncryptedFile.copyTo(encryptedDest, overwrite = true)
+                    shredAndDeleteFile(tempEncryptedFile)
+                }
+            } finally {
+                fileKeyBytes.fill(0)
+                if (tempEncryptedFile.exists()) {
+                    shredAndDeleteFile(tempEncryptedFile)
                 }
             }
 
@@ -279,7 +494,7 @@ class CryptoVaultEngine(
                 formatCategory = fileNode.category.name,
                 originalSizeBytes = if (totalReadBytes > 0) totalReadBytes else fileNode.sizeBytes,
                 ivHex = iv.toHex(),
-                saltHex = salt.toHex(),
+                saltHex = fileSalt.toHex(),
                 sha256Checksum = sha256Hex
             )
             Result.success(entity)
@@ -294,7 +509,12 @@ class CryptoVaultEngine(
      */
     fun shredAndDeleteFile(target: File) {
         try {
-            if (!target.exists() || !target.isFile) return
+            if (!target.exists()) return
+            if (target.isDirectory) {
+                target.listFiles()?.forEach { child -> shredAndDeleteFile(child) }
+                target.delete()
+                return
+            }
             val length = target.length()
             if (length > 0 && target.canWrite()) {
                 RandomAccessFile(target, "rws").use { raf ->
@@ -336,34 +556,52 @@ class CryptoVaultEngine(
         try {
             if (!targetDirectory.exists()) targetDirectory.mkdirs()
 
-            val salt = item.saltHex.hexToBytes()
+            val fileSalt = item.saltHex.hexToBytes()
             val iv = item.ivHex.hexToBytes()
-            val keyBytes = deriveKeyBytes(activeSecret, salt, 32)
-            val secretKey = SecretKeySpec(keyBytes, "AES")
 
+            // Primary path: unwrap v1.2.0 Master DEK and derive per-file subkey.
+            // If vault is configured with Master DEK, unwrapMasterDekWithSecret enforces authentication.
+            val hasWrappedMasterDek =
+                (prefs?.contains(KEY_WRAPPED_DEK_PRIMARY) == true) || (memoryWrappedDekPrimary != null)
+            val fileKeyBytes = if (hasWrappedMasterDek) {
+                val masterDek = unwrapMasterDekWithSecret(activeSecret)
+                try {
+                    deriveFileSubKeyFromMasterDek(masterDek, fileSalt)
+                } finally {
+                    masterDek.fill(0)
+                }
+            } else {
+                deriveKeyBytes(activeSecret, fileSalt, 32)
+            }
+
+            val secretKey = SecretKeySpec(fileKeyBytes, "AES")
             val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, secretKey, GCMParameterSpec(GCM_TAG_BITS, iv))
 
             val sha256Digest = MessageDigest.getInstance("SHA-256")
 
-            BufferedInputStream(FileInputStream(encFile), BUFFER_SIZE).use { input ->
-                BufferedOutputStream(FileOutputStream(tempStagingFile), BUFFER_SIZE).use { output ->
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    var bytesRead: Int
-                    while (input.read(buffer).also { bytesRead = it } != -1) {
-                        val decryptedChunk = cipher.update(buffer, 0, bytesRead)
-                        if (decryptedChunk != null && decryptedChunk.isNotEmpty()) {
-                            sha256Digest.update(decryptedChunk)
-                            output.write(decryptedChunk)
+            try {
+                BufferedInputStream(FileInputStream(encFile), BUFFER_SIZE).use { input ->
+                    BufferedOutputStream(FileOutputStream(tempStagingFile), BUFFER_SIZE).use { output ->
+                        val buffer = ByteArray(BUFFER_SIZE)
+                        var bytesRead: Int
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            val decryptedChunk = cipher.update(buffer, 0, bytesRead)
+                            if (decryptedChunk != null && decryptedChunk.isNotEmpty()) {
+                                sha256Digest.update(decryptedChunk)
+                                output.write(decryptedChunk)
+                            }
                         }
+                        val finalChunk = cipher.doFinal()
+                        if (finalChunk != null && finalChunk.isNotEmpty()) {
+                            sha256Digest.update(finalChunk)
+                            output.write(finalChunk)
+                        }
+                        output.flush()
                     }
-                    val finalChunk = cipher.doFinal()
-                    if (finalChunk != null && finalChunk.isNotEmpty()) {
-                        sha256Digest.update(finalChunk)
-                        output.write(finalChunk)
-                    }
-                    output.flush()
                 }
+            } finally {
+                fileKeyBytes.fill(0)
             }
 
             val restoredSha256 = sha256Digest.digest().toHex()
@@ -402,7 +640,7 @@ class CryptoVaultEngine(
             if (e is AEADBadTagException || e.cause is AEADBadTagException) {
                 Result.failure(
                     IllegalStateException(
-                        "AES-256-GCM Authentication Tag Verification Failed: The provided PIN/Password does not match the encryption key used for '${item.originalName}', or the ciphertext was tampered with.",
+                        "AES-256-GCM Authentication Tag Verification Failed: The provided PIN/Password is invalid or the ciphertext was tampered with.",
                         e
                     )
                 )
@@ -454,8 +692,9 @@ class CryptoVaultEngine(
         val remediation = when {
             throwable is AEADBadTagException ||
                 cause is AEADBadTagException ||
-                exactReason.contains("Tag", ignoreCase = true) ->
-                "Unlock the Secure Vault using the exact PIN or Alphanumeric Password that was active when this file was encrypted."
+                exactReason.contains("Tag", ignoreCase = true) ||
+                exactReason.contains("PIN", ignoreCase = true) ->
+                "Unlock the Secure Vault using your active PIN/Master Password, or use Password Recovery to unwrap the 256-bit Master DEK."
             exactReason.contains("Permission denied", ignoreCase = true) ||
                 exactReason.contains("EACCES", ignoreCase = true) ->
                 "Grant 'All Files Access' in Android Settings or select the folder via Storage Access Framework."
@@ -484,6 +723,9 @@ class CryptoVaultEngine(
             spec.clearPassword()
         }
     }
+
+    private fun sha256Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 

@@ -48,12 +48,88 @@ enum class VaultAuthMode(val label: String, val minLength: Int) {
     ALPHANUMERIC_PASSWORD("Alphanumeric Password", 6)
 }
 
+enum class DownloadUiMode(val label: String) {
+    DEFAULT("Default (Auto Highest Quality)"),
+    ADVANCED("Advanced (Manual Stream & Engine Control)")
+}
+
 data class ClipboardState(
     val sourceNodes: List<FileNode> = emptyList(),
     val isMoveOperation: Boolean = false,
     val conflictPolicy: ConflictPolicy = ConflictPolicy.KEEP_BOTH
 ) {
     val isActive: Boolean get() = sourceNodes.isNotEmpty()
+}
+
+data class RecycleBinItem(
+    val id: String,
+    val originalName: String,
+    val originalPath: String,
+    val trashStoragePath: String,
+    val isDirectory: Boolean,
+    val sizeBytes: Long,
+    val deletedAtMillis: Long,
+    val mimeType: String
+)
+
+sealed class UndoOperation(open val summaryLabel: String) {
+    data class RestoreRecycleBinItems(
+        val items: List<RecycleBinItem>,
+        override val summaryLabel: String
+    ) : UndoOperation(summaryLabel)
+
+    data class DeleteCreatedPaths(
+        val createdPaths: List<String>,
+        override val summaryLabel: String
+    ) : UndoOperation(summaryLabel)
+
+    data class ReverseMoveOperation(
+        val movedPairs: List<Pair<String, String>>, // Pair(currentDestinationPath, originalSourcePath)
+        override val summaryLabel: String
+    ) : UndoOperation(summaryLabel)
+
+    data class ReverseRenameOperation(
+        val currentPath: String,
+        val previousName: String,
+        override val summaryLabel: String
+    ) : UndoOperation(summaryLabel)
+}
+
+data class MediaStreamVariant(
+    val variantId: String,
+    val label: String,
+    val containerExtension: String,
+    val mimeType: String,
+    val resolutionLabel: String,
+    val widthPx: Int,
+    val heightPx: Int,
+    val frameRateFps: Int,
+    val videoCodec: String,
+    val videoBitrateKbps: Int,
+    val videoStreamUrl: String,
+    val audioCodec: String,
+    val audioBitrateKbps: Int,
+    val audioStreamUrl: String?,
+    val hasEmbeddedAudio: Boolean,
+    val requiresAudioVideoMux: Boolean,
+    val isWatermarkFree: Boolean = true,
+    val estimatedSizeBytes: Long = -1L
+) {
+    val hasAudio: Boolean get() = hasEmbeddedAudio || !audioStreamUrl.isNullOrBlank()
+}
+
+data class ResolvedMediaManifest(
+    val sourceUrl: String,
+    val platformName: String,
+    val title: String,
+    val creatorAttribution: String,
+    val suggestedFileName: String,
+    val isSocialPlatform: Boolean,
+    val variants: List<MediaStreamVariant>,
+    val recommendedVariantId: String
+) {
+    val recommendedVariant: MediaStreamVariant?
+        get() = variants.firstOrNull { it.variantId == recommendedVariantId } ?: variants.firstOrNull()
 }
 
 data class FileNode(

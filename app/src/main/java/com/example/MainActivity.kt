@@ -53,6 +53,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -62,10 +63,12 @@ import com.example.ui.LumaFormatUtils
 import com.example.ui.components.BatchRegexRenameDialog
 import com.example.ui.components.BatchZipNameDialog
 import com.example.ui.components.CreateFileOrFolderDialog
+import com.example.ui.components.DeleteChoiceDialog
 import com.example.ui.components.ExactDiagnosticErrorDialog
 import com.example.ui.components.FileChecksumInspectorDialog
 import com.example.ui.components.FirstLaunchPermissionOnboardingDialog
 import com.example.ui.components.OpenWithPermissionDialog
+import com.example.ui.components.RecycleBinModalSheet
 import com.example.ui.screens.AdvancedWorkstationHubScreen
 import com.example.ui.screens.DownloadManagerScreen
 import com.example.ui.screens.ExplorerScreen
@@ -268,6 +271,9 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
                             },
                             onSelectCategoryCard = { cat -> viewModel.setCategoryFilter(cat) },
                             onOpenSecureVaultTab = { viewModel.selectTab(LumaTab.VAULT) },
+                            onOpenRecycleBin = { viewModel.toggleRecycleBinSheet(true) },
+                            onExecuteUndo = { viewModel.performLastUndo() },
+                            onDismissUndo = { viewModel.dismissUndoBanner() },
                             onNavigateBreadcrumb = { path -> viewModel.navigateToDirectory(path) },
                             onSearchChanged = { q, regex -> viewModel.updateSearchQuery(q, regex) },
                             onSortChanged = { opt -> viewModel.setSortOption(opt) },
@@ -335,11 +341,23 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
                         LumaTab.DOWNLOADS -> DownloadManagerScreen(
                             tasks = downloadTasks,
                             presets = viewModel.downloadPresets,
-                            onStartDownload = { url, name, threads ->
-                                viewModel.enqueueDownload(url, name, threads)
+                            isAdvancedMode = state.isAdvancedMode,
+                            isResolvingMediaUrl = state.isResolvingMediaUrl,
+                            resolvedManifest = state.resolvedMediaManifest,
+                            selectedStreamVariantId = state.selectedStreamVariantId,
+                            onInspectUrl = { url -> viewModel.inspectMediaUrl(url) },
+                            onSelectStreamVariant = { id -> viewModel.selectMediaStreamVariant(id) },
+                            onStartSmartDownload = { url, name, threads, expectedSha ->
+                                viewModel.enqueueDownload(
+                                    url = url,
+                                    customFileName = name,
+                                    threads = threads,
+                                    expectedSha256 = expectedSha
+                                )
                             },
                             onPauseTask = { id -> viewModel.pauseDownloadTask(id) },
                             onResumeTask = { id -> viewModel.resumeDownloadTask(id) },
+                            onRecoverQueue = { viewModel.recoverPersistentDownloads() },
                             onDeleteTask = { task -> viewModel.deleteDownloadTask(task, deleteFileFromDisk = true) },
                             onOpenCompletedFile = { task -> viewModel.openDownloadedFile(task) }
                         )
@@ -450,7 +468,28 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
         )
     }
 
-    // 1. Open-With Permission & Routing Prompt (Shown whenever user taps a file)
+    // 1. Delete Choice Dialog (Prompt on every delete: Recycle Bin vs Permanent Zero-Overwrite Shred)
+    if (state.pendingDeleteTargets.isNotEmpty()) {
+        DeleteChoiceDialog(
+            targets = state.pendingDeleteTargets,
+            onMoveToRecycleBin = { viewModel.confirmMovePendingToRecycleBin() },
+            onPermanentShred = { viewModel.confirmPermanentlyShredPending() },
+            onDismiss = { viewModel.dismissDeleteChoiceDialog() }
+        )
+    }
+
+    // 2. Recycle Bin Management Sheet
+    if (state.showRecycleBinSheet) {
+        RecycleBinModalSheet(
+            items = state.recycleBinItems,
+            onRestoreItem = { item -> viewModel.restoreRecycleBinItem(item) },
+            onShredItem = { item -> viewModel.permanentlyDeleteRecycleBinItem(item) },
+            onEmptyAll = { viewModel.emptyAllRecycleBin() },
+            onDismiss = { viewModel.toggleRecycleBinSheet(false) }
+        )
+    }
+
+    // 3. Open-With Permission & Routing Prompt (Shown whenever user taps a file)
     state.pendingOpenWithFile?.let { targetNode ->
         OpenWithPermissionDialog(
             fileNode = targetNode,
@@ -475,7 +514,7 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
         )
     }
 
-    // 2. Checksum & Attribute Inspector Modal
+    // 4. Checksum & Attribute Inspector Modal
     state.inspectedFileNode?.let { inspected ->
         FileChecksumInspectorDialog(
             node = inspected,
@@ -490,7 +529,7 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
         )
     }
 
-    // 3. Create New File / Folder Dialog
+    // 5. Create New File / Folder Dialog
     if (showCreateDialog) {
         CreateFileOrFolderDialog(
             onConfirm = { name, isDir, content ->
@@ -500,7 +539,7 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
         )
     }
 
-    // 4. Batch Regex Rename Dialog
+    // 6. Batch Regex Rename Dialog
     if (showBatchRenameDialog) {
         BatchRegexRenameDialog(
             currentDirectory = state.currentPath,
@@ -511,7 +550,7 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
         )
     }
 
-    // 5. Batch Compress Selected to ZIP Dialog
+    // 7. Batch Compress Selected to ZIP Dialog
     if (showBatchZipDialog) {
         BatchZipNameDialog(
             selectedCount = state.selectedFilePaths.size,
@@ -522,7 +561,7 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
         )
     }
 
-    // 6. Exact Error Diagnostic Report Dialog
+    // 8. Exact Error Diagnostic Report Dialog
     state.activeDiagnosticError?.let { diagError ->
         ExactDiagnosticErrorDialog(
             error = diagError,
@@ -549,7 +588,10 @@ private fun LumaTopBrandHeader(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.weight(1f)
+            ) {
                 Box(
                     modifier = Modifier
                         .size(38.dp)
@@ -567,20 +609,26 @@ private fun LumaTopBrandHeader(
                     )
                 }
                 Spacer(modifier = Modifier.width(10.dp))
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = stringResource(R.string.brand_original_name),
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.testTag("luma_files_brand_header")
                     )
                     Text(
                         text = stringResource(R.string.brand_subtitle),
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
+
+            Spacer(modifier = Modifier.width(8.dp))
 
             Row(
                 verticalAlignment = Alignment.CenterVertically,

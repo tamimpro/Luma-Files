@@ -9,9 +9,12 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -21,14 +24,18 @@ import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.EditNote
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteForever
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Memory
+import androidx.compose.material.icons.filled.RestoreFromTrash
 import androidx.compose.material.icons.filled.SdStorage
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.VerifiedUser
+import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -38,6 +45,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -56,9 +64,11 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.domain.model.DiagnosticError
 import com.example.domain.model.FileNode
+import com.example.domain.model.RecycleBinItem
 import com.example.ui.LumaFormatUtils
 import com.example.ui.theme.JetBrainsMonoFontFamily
 
@@ -79,14 +89,14 @@ fun FirstLaunchPermissionOnboardingDialog(
                     modifier = Modifier.size(28.dp)
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Storage & Permission Setup",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold
                     )
                     Text(
-                        text = "Luma Files v1.1.0 • Remembered Automatically",
+                        text = "Luma Files v1.2.0 • Remembered Automatically",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary
                     )
@@ -198,12 +208,308 @@ fun FirstLaunchPermissionOnboardingDialog(
 }
 
 @Composable
+fun DeleteChoiceDialog(
+    targets: List<FileNode>,
+    onMoveToRecycleBin: () -> Unit,
+    onPermanentShred: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val label = if (targets.size == 1) "'${targets.first().name}'" else "${targets.size} selected items"
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Delete,
+                    contentDescription = "Delete Options",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(26.dp)
+                )
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Delete $label",
+                        style = MaterialTheme.typography.titleLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "Choose how to remove the selected item(s)",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                // Option 1: Move to Recycle Bin (Undoable)
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { onMoveToRecycleBin() }
+                        .testTag("confirm_move_to_recycle_bin_btn"),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.RestoreFromTrash,
+                            contentDescription = "Recycle Bin",
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                            modifier = Modifier.size(26.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Move to Recycle Bin (Undoable)",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                            Text(
+                                text = "Safely quarantine item(s) with one-tap Undo or full restoration to their original path",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
+                            )
+                        }
+                    }
+                }
+
+                // Option 2: Permanent Zero-Overwrite Shred
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable { onPermanentShred() }
+                        .testTag("confirm_permanent_shred_btn"),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.7f)
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.DeleteForever,
+                            contentDescription = "Permanent Shred",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(26.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Permanent Zero-Overwrite Shred",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                            Text(
+                                text = "Overwrites file bytes with 0x00 and flushes descriptors before unlinking. Cannot be undone.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = onMoveToRecycleBin,
+                modifier = Modifier.testTag("dialog_primary_recycle_btn")
+            ) {
+                Text("Move to Recycle Bin")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        }
+    )
+}
+
+@Composable
+fun RecycleBinModalSheet(
+    items: List<RecycleBinItem>,
+    onRestoreItem: (RecycleBinItem) -> Unit,
+    onShredItem: (RecycleBinItem) -> Unit,
+    onEmptyAll: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteSweep,
+                        contentDescription = "Recycle Bin",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(26.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = "Recycle Bin (${items.size})",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            text = "Restore items or permanently zero-shred them",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        },
+        text = {
+            if (items.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.DeleteSweep,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(42.dp)
+                    )
+                    Text(
+                        text = "Recycle Bin is Empty",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = "Deleted files moved to the Recycle Bin appear here for safe restoration.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 360.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(items, key = { it.id }) { item ->
+                        Card(
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f)
+                            ),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = item.originalName,
+                                            style = MaterialTheme.typography.titleSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "Original: ${item.originalPath}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            text = "${LumaFormatUtils.formatBytes(item.sizeBytes)} • Deleted ${LumaFormatUtils.formatTimestamp(item.deletedAtMillis)}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        IconButton(
+                                            onClick = { onRestoreItem(item) },
+                                            modifier = Modifier.testTag("restore_recycle_${item.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.RestoreFromTrash,
+                                                contentDescription = "Restore ${item.originalName}",
+                                                tint = MaterialTheme.colorScheme.primary
+                                            )
+                                        }
+                                        IconButton(
+                                            onClick = { onShredItem(item) },
+                                            modifier = Modifier.testTag("shred_recycle_${item.id}")
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.DeleteForever,
+                                                contentDescription = "Permanently Shred ${item.originalName}",
+                                                tint = MaterialTheme.colorScheme.error
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (items.isNotEmpty()) {
+                Button(
+                    onClick = onEmptyAll,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error
+                    ),
+                    modifier = Modifier.testTag("empty_recycle_bin_btn")
+                ) {
+                    Icon(Icons.Default.DeleteForever, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Empty & Shred All")
+                }
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close")
+            }
+        }
+    )
+}
+
+@Composable
 fun BatchZipNameDialog(
     selectedCount: Int,
     onConfirm: (archiveName: String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var archiveName by remember { mutableStateOf("Luma_Bundle_${selectedCount}_Files.zip") }
+    var archiveName by remember { mutableStateOf("Archive_${selectedCount}_Items.zip") }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
@@ -220,7 +526,7 @@ fun BatchZipNameDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "Creates a standard deflate ZIP archive in the current directory with recursive folder support.",
+                    text = "Creates an atomic deflate ZIP archive in the current directory with self-inclusion exclusion and canonical path safety.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -277,15 +583,17 @@ fun OpenWithPermissionDialog(
                     modifier = Modifier.size(26.dp)
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "Open File Studio Router",
                         style = MaterialTheme.typography.titleLarge
                     )
                     Text(
-                        text = "Select how you want to open '${fileNode.name}'",
+                        text = "Select how you want to view '${fileNode.name}'",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -309,7 +617,10 @@ fun OpenWithPermissionDialog(
                             Text(
                                 text = fileNode.category.label,
                                 style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.primary
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.weight(1f),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
                                 text = LumaFormatUtils.formatBytes(fileNode.sizeBytes),
@@ -325,7 +636,7 @@ fun OpenWithPermissionDialog(
                     }
                 }
 
-                // Option 1: Luma Files Built-In Lossless Studio
+                // Option 1: Luma Files Built-In Lossless Studio (View Mode First)
                 Card(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -341,21 +652,21 @@ fun OpenWithPermissionDialog(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
-                            imageVector = Icons.Default.EditNote,
-                            contentDescription = "Luma Studio",
+                            imageVector = Icons.Default.Visibility,
+                            contentDescription = "Luma Studio View First",
                             tint = MaterialTheme.colorScheme.onPrimaryContainer,
                             modifier = Modifier.size(28.dp)
                         )
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Open & Edit in Luma Files Studio",
-                                style = MaterialTheme.typography.titleMedium,
+                                text = "View in Luma Studio (Edit Option Available)",
+                                style = MaterialTheme.typography.titleSmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer,
                                 fontWeight = FontWeight.Bold
                             )
                             Text(
-                                text = "100% original byte quality preserved • Built-in ${fileNode.category.badgeText} Studio",
+                                text = "Opens in safe read-only View Mode first • Tap Edit anytime for lossless modification",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f)
                             )
@@ -432,7 +743,7 @@ fun OpenWithPermissionDialog(
                                 style = MaterialTheme.typography.titleSmall
                             )
                             Text(
-                                text = "Paginated byte-offset inspector, MD5/SHA-256 & byte patching",
+                                text = "Paginated byte-offset viewer, MD5/SHA-256 & optional byte patching",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -482,7 +793,7 @@ fun ExactDiagnosticErrorDialog(
                     modifier = Modifier.size(28.dp)
                 )
                 Spacer(modifier = Modifier.width(10.dp))
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = error.operationTitle,
                         style = MaterialTheme.typography.titleLarge,
@@ -743,16 +1054,10 @@ fun CreateFileOrFolderDialog(
     onDismiss: () -> Unit
 ) {
     var isDirectory by remember { mutableStateOf(false) }
-    var name by remember { mutableStateOf("New_Document.md") }
-    var content by remember { mutableStateOf("# Created in Luma Files Studio\nLossless quality file.") }
+    var name by remember { mutableStateOf("") }
+    var content by remember { mutableStateOf("") }
 
-    val quickTemplates = listOf(
-        "Markdown (.md)" to "Notes.md",
-        "CSV Grid (.csv)" to "Metrics.csv",
-        "Word (.docx)" to "Report.docx",
-        "JSON (.json)" to "Config.json",
-        "XML (.xml)" to "Manifest.xml"
-    )
+    val quickExtensions = listOf(".md", ".txt", ".csv", ".docx", ".json", ".xml")
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -765,25 +1070,19 @@ fun CreateFileOrFolderDialog(
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilterChip(
                         selected = !isDirectory,
-                        onClick = {
-                            isDirectory = false
-                            if (!name.contains(".")) name = "New_Document.md"
-                        },
+                        onClick = { isDirectory = false },
                         label = { Text("New File") }
                     )
                     FilterChip(
                         selected = isDirectory,
-                        onClick = {
-                            isDirectory = true
-                            name = "New_Folder"
-                        },
+                        onClick = { isDirectory = true },
                         label = { Text("New Folder") }
                     )
                 }
 
                 if (!isDirectory) {
                     Text(
-                        text = "Quick Format Presets:",
+                        text = "Append Extension:",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -791,21 +1090,17 @@ fun CreateFileOrFolderDialog(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        quickTemplates.take(3).forEach { (label, suggested) ->
+                        quickExtensions.forEach { ext ->
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
                                 color = MaterialTheme.colorScheme.surfaceVariant,
                                 modifier = Modifier.clickable {
-                                    name = suggested
-                                    if (suggested.endsWith(".csv")) {
-                                        content = "ID,Component,Status,LatencyMs\n1,CoreEngine,READY,4.2\n2,VaultCrypto,LOCKED,1.8"
-                                    } else if (suggested.endsWith(".json")) {
-                                        content = "{\n  \"engine\": \"Luma Files\",\n  \"version\": \"1.1.0\"\n}"
-                                    }
+                                    val base = name.substringBeforeLast('.', name).ifBlank { "Untitled" }
+                                    name = "$base$ext"
                                 }
                             ) {
                                 Text(
-                                    text = label,
+                                    text = ext,
                                     style = MaterialTheme.typography.labelSmall,
                                     modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
                                 )
@@ -817,7 +1112,8 @@ fun CreateFileOrFolderDialog(
                 OutlinedTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text(if (isDirectory) "Folder Name" else "File Name with Extension") },
+                    placeholder = { Text(if (isDirectory) "Enter folder name" else "Enter file name with extension") },
+                    label = { Text(if (isDirectory) "Folder Name" else "File Name") },
                     singleLine = true,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -828,7 +1124,8 @@ fun CreateFileOrFolderDialog(
                     OutlinedTextField(
                         value = content,
                         onValueChange = { content = it },
-                        label = { Text("Initial Content") },
+                        placeholder = { Text("Optional initial file content...") },
+                        label = { Text("Initial Content (Optional)") },
                         minLines = 3,
                         maxLines = 5,
                         modifier = Modifier.fillMaxWidth()
@@ -840,10 +1137,11 @@ fun CreateFileOrFolderDialog(
             Button(
                 onClick = {
                     if (name.isNotBlank()) {
-                        onConfirm(name, isDirectory, content)
+                        onConfirm(name.trim(), isDirectory, content)
                         onDismiss()
                     }
                 },
+                enabled = name.isNotBlank(),
                 modifier = Modifier.testTag("confirm_create_item_btn")
             ) {
                 Text("Create")
@@ -863,13 +1161,13 @@ fun BatchRegexRenameDialog(
     onConfirm: (pattern: String, replacement: String, prefix: String) -> Unit,
     onDismiss: () -> Unit
 ) {
-    var pattern by remember { mutableStateOf("_Copy") }
-    var replacement by remember { mutableStateOf("_Verified") }
+    var pattern by remember { mutableStateOf("") }
+    var replacement by remember { mutableStateOf("") }
     var prefix by remember { mutableStateOf("") }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Advanced Batch Regex Rename") },
+        title = { Text("Batch Regex Rename") },
         text = {
             Column(
                 modifier = Modifier.fillMaxWidth(),
@@ -883,7 +1181,8 @@ fun BatchRegexRenameDialog(
                 OutlinedTextField(
                     value = pattern,
                     onValueChange = { pattern = it },
-                    label = { Text("Regex Match Pattern (e.g. _Copy or \\s+)") },
+                    placeholder = { Text("e.g. \\s+ or _copy") },
+                    label = { Text("Regex Match Pattern") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -897,7 +1196,7 @@ fun BatchRegexRenameDialog(
                 OutlinedTextField(
                     value = prefix,
                     onValueChange = { prefix = it },
-                    label = { Text("Optional Filename Prefix (e.g. luma_)") },
+                    label = { Text("Optional Filename Prefix") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -908,7 +1207,8 @@ fun BatchRegexRenameDialog(
                 onClick = {
                     onConfirm(pattern, replacement, prefix)
                     onDismiss()
-                }
+                },
+                enabled = pattern.isNotBlank() || prefix.isNotBlank()
             ) {
                 Text("Execute Batch Rename")
             }

@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Android
 import androidx.compose.material.icons.filled.Archive
@@ -40,6 +41,7 @@ import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FilterList
@@ -113,6 +115,9 @@ fun ExplorerScreen(
     onSelectStorageRoot: (StorageVolumeRoot) -> Unit,
     onSelectCategoryCard: (FileFormatCategory?) -> Unit,
     onOpenSecureVaultTab: () -> Unit,
+    onOpenRecycleBin: () -> Unit,
+    onExecuteUndo: () -> Unit,
+    onDismissUndo: () -> Unit,
     onNavigateBreadcrumb: (String) -> Unit,
     onSearchChanged: (String, Boolean) -> Unit,
     onSortChanged: (SortOption) -> Unit,
@@ -140,6 +145,10 @@ fun ExplorerScreen(
     var renameTargetNode by remember { mutableStateOf<FileNode?>(null) }
     var renameInputText by remember { mutableStateOf("") }
 
+    val hasBottomOverlay = state.selectedFilePaths.isNotEmpty() ||
+        state.clipboardState.isActive ||
+        state.lastUndoOperation != null
+
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
             modifier = Modifier
@@ -149,11 +158,11 @@ fun ExplorerScreen(
                 start = 16.dp,
                 end = 16.dp,
                 top = 12.dp,
-                bottom = if (state.selectedFilePaths.isNotEmpty() || state.clipboardState.isActive) 150.dp else 24.dp
+                bottom = if (hasBottomOverlay) 190.dp else 24.dp
             ),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            // 1. Streamlined Luma Files Storage Bar (Hides persistent permission buttons once remembered or granted)
+            // 1. Streamlined Luma Files Storage Bar
             item {
                 LumaStorageHeroCard(
                     state = state,
@@ -162,7 +171,7 @@ fun ExplorerScreen(
                 )
             }
 
-            // 2. Storage Volume Roots Switcher (Internal Shared Storage First!)
+            // 2. Storage Volume Roots Switcher (Internal Shared Storage First)
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Row(
@@ -173,15 +182,39 @@ fun ExplorerScreen(
                         Text(
                             text = "STORAGE VOLUMES (INTERNAL, SD CARD & SAF)",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
                         )
-                        TextButton(
-                            onClick = onRequestSafFolderMount,
-                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            Icon(Icons.Default.CreateNewFolder, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Mount SAF / SD", style = MaterialTheme.typography.labelSmall)
+                            TextButton(
+                                onClick = onOpenRecycleBin,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                                modifier = Modifier.testTag("open_recycle_bin_btn")
+                            ) {
+                                Icon(
+                                    Icons.Default.DeleteSweep,
+                                    contentDescription = "Recycle Bin",
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = "Recycle Bin (${state.recycleBinItems.size})",
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                            TextButton(
+                                onClick = onRequestSafFolderMount,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                            ) {
+                                Icon(Icons.Default.CreateNewFolder, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("Mount SAF", style = MaterialTheme.typography.labelSmall)
+                            }
                         }
                     }
                     LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -259,7 +292,7 @@ fun ExplorerScreen(
                     ) {
                         CategoryQuickCard(
                             title = "DOCX / CSV",
-                            subtitle = "DOM & Grid",
+                            subtitle = "View & Edit",
                             icon = Icons.Default.Description,
                             accentColor = BlueDoc,
                             isSelected = state.selectedCategoryFilter == FileFormatCategory.PDF,
@@ -317,7 +350,7 @@ fun ExplorerScreen(
                         )
                         CategoryQuickCard(
                             title = "Media",
-                            subtitle = "WAV, MP4, PNG",
+                            subtitle = "Audio & Video",
                             icon = Icons.Default.Audiotrack,
                             accentColor = RoseMedia,
                             isSelected = state.selectedCategoryFilter == FileFormatCategory.VIDEO,
@@ -330,7 +363,7 @@ fun ExplorerScreen(
                         )
                         CategoryQuickCard(
                             title = "Safe Vault",
-                            subtitle = "210k PBKDF2",
+                            subtitle = "Wrapped DEK",
                             icon = Icons.Default.Lock,
                             accentColor = EmeraldVault,
                             isSelected = false,
@@ -511,11 +544,11 @@ fun ExplorerScreen(
                                 modifier = Modifier.size(48.dp)
                             )
                             Text(
-                                text = "No matching files in this view",
+                                text = "This folder is empty",
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                text = "Tap '+ New' to create a lossless file or folder, or switch storage volumes above.",
+                                text = "Tap '+ New' to create a file or folder, or switch storage volumes above.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -545,23 +578,93 @@ fun ExplorerScreen(
             }
         }
 
-        // 7. Floating Multi-Select & Clipboard Action Dock
-        if (state.selectedFilePaths.isNotEmpty() || state.clipboardState.isActive) {
-            FloatingBatchAndClipboardDock(
-                state = state,
-                onCopySelected = { onStageBatchClipboard(false) },
-                onMoveSelected = { onStageBatchClipboard(true) },
-                onZipSelected = onShowBatchZipDialog,
-                onEncryptSelected = onBatchEncryptSelected,
-                onDeleteSelected = onBatchDeleteSelected,
-                onClearSelection = onClearSelection,
-                onSetConflictPolicy = onSetConflictPolicy,
-                onPasteHere = onPasteClipboardHere,
-                onClearClipboard = onClearClipboard,
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(12.dp)
-            )
+        // 7. Bottom Stack: One-Tap Undo Banner + Floating Multi-Select & Clipboard Action Dock
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            state.lastUndoOperation?.let { undoOp ->
+                Card(
+                    shape = RoundedCornerShape(14.dp),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.inverseSurface
+                    ),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("one_tap_undo_banner")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.Undo,
+                                contentDescription = "Undo Available",
+                                tint = MaterialTheme.colorScheme.inversePrimary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = undoOp.summaryLabel,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.inverseOnSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = onExecuteUndo,
+                                modifier = Modifier.testTag("execute_undo_btn")
+                            ) {
+                                Text(
+                                    text = "UNDO",
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.inversePrimary
+                                )
+                            }
+                            IconButton(
+                                onClick = onDismissUndo,
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Clear,
+                                    contentDescription = "Dismiss Undo",
+                                    tint = MaterialTheme.colorScheme.inverseOnSurface,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (state.selectedFilePaths.isNotEmpty() || state.clipboardState.isActive) {
+                FloatingBatchAndClipboardDock(
+                    state = state,
+                    onCopySelected = { onStageBatchClipboard(false) },
+                    onMoveSelected = { onStageBatchClipboard(true) },
+                    onZipSelected = onShowBatchZipDialog,
+                    onEncryptSelected = onBatchEncryptSelected,
+                    onDeleteSelected = onBatchDeleteSelected,
+                    onClearSelection = onClearSelection,
+                    onSetConflictPolicy = onSetConflictPolicy,
+                    onPasteHere = onPasteClipboardHere,
+                    onClearClipboard = onClearClipboard,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
         }
     }
 
@@ -621,7 +724,6 @@ private fun FloatingBatchAndClipboardDock(
             containerColor = MaterialTheme.colorScheme.surface
         ),
         modifier = modifier
-            .fillMaxWidth()
             .border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(18.dp))
             .testTag("floating_batch_action_dock")
     ) {
@@ -706,7 +808,7 @@ private fun FloatingBatchAndClipboardDock(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
+                    Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "${if (clip.isMoveOperation) "Move" else "Copy"} Clipboard: ${clip.sourceNodes.size} item(s)",
                             style = MaterialTheme.typography.titleSmall,
@@ -765,7 +867,6 @@ private fun LumaStorageHeroCard(
     val usedBytes = (totalBytes - freeBytes).coerceAtLeast(0L)
     val usedFraction = if (totalBytes > 0) (usedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0.05f, 1f) else 0.5f
 
-    // Show permission buttons only if All Files Access is not granted AND the user hasn't dismissed/remembered the onboarding decision
     val showAccessControlButtons = !state.hasAllFilesAccess && !state.isPermissionDecisionRemembered
     val cardHeight = if (showAccessControlButtons) 172.dp else 124.dp
 
@@ -808,7 +909,7 @@ private fun LumaStorageHeroCard(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "LUMA FILES v1.1.0 • STORAGE ENGINE",
+                                text = "LUMA FILES v1.2.0 • STORAGE ENGINE",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = ElectricCyan
                             )
@@ -821,6 +922,7 @@ private fun LumaStorageHeroCard(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
+                        Spacer(modifier = Modifier.width(8.dp))
                         Surface(
                             shape = RoundedCornerShape(10.dp),
                             color = if (state.hasAllFilesAccess) {
@@ -958,7 +1060,7 @@ private fun CategoryQuickCard(
                 )
             }
             Spacer(modifier = Modifier.width(8.dp))
-            Column {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = title,
                     style = MaterialTheme.typography.labelLarge,
@@ -1102,14 +1204,18 @@ private fun FileNodeRowCard(
                 Text(
                     text = "$sizeOrItems • ${LumaFormatUtils.formatTimestamp(node.lastModified)}",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
 
                 if (isAdvancedMode) {
                     Text(
                         text = "POSIX: ${node.permissionsRwx} • MIME: ${node.mimeType}",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.tertiary
+                        color = MaterialTheme.colorScheme.tertiary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }
@@ -1130,7 +1236,7 @@ private fun FileNodeRowCard(
                     onDismissRequest = { menuExpanded = false }
                 ) {
                     DropdownMenuItem(
-                        text = { Text(if (node.isDirectory) "Open Directory" else "Open / Edit in Studio...") },
+                        text = { Text(if (node.isDirectory) "Open Directory" else "View / Edit in Studio...") },
                         leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
                         onClick = {
                             menuExpanded = false
@@ -1180,7 +1286,7 @@ private fun FileNodeRowCard(
                         }
                     )
                     DropdownMenuItem(
-                        text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                        text = { Text("Delete (Recycle Bin / Shred)", color = MaterialTheme.colorScheme.error) },
                         leadingIcon = {
                             Icon(
                                 Icons.Default.Delete,

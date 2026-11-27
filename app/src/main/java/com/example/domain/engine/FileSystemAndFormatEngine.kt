@@ -21,6 +21,7 @@ import com.example.domain.model.DuplicateGroup
 import com.example.domain.model.FileFormatCategory
 import com.example.domain.model.FileNode
 import com.example.domain.model.HexRow
+import com.example.domain.model.RecycleBinItem
 import com.example.domain.model.SortOption
 import com.example.domain.model.StorageAnalyzerReport
 import com.example.domain.model.StorageVolumeRoot
@@ -28,8 +29,6 @@ import com.example.domain.model.StudioContent
 import com.example.domain.model.ZipEntryInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import org.json.JSONArray
-import org.json.JSONObject
 import org.w3c.dom.Document
 import org.w3c.dom.Element
 import org.w3c.dom.Node
@@ -40,14 +39,15 @@ import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.io.RandomAccessFile
-import java.io.StringReader
 import java.io.StringWriter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.Charset
+import java.util.UUID
 import java.util.zip.CRC32
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -58,7 +58,12 @@ import javax.xml.transform.OutputKeys
 import javax.xml.transform.TransformerFactory
 import javax.xml.transform.dom.DOMSource
 import javax.xml.transform.stream.StreamResult
-import javax.xml.transform.stream.StreamSource
+
+data class CopyMoveBatchResult(
+    val processedCount: Int,
+    val createdDestinationPaths: List<String>,
+    val movedPairs: List<Pair<String, String>> // Pair(newDestinationPath, originalSourcePath)
+)
 
 class FileSystemAndFormatEngine(
     private val context: Context?,
@@ -70,7 +75,26 @@ class FileSystemAndFormatEngine(
         context?.filesDir ?: File(System.getProperty("java.io.tmpdir")),
         "Luma_Workspace"
     )).apply {
-        WorkspaceSeedEngine.ensureSeeded(this)
+        if (!exists()) mkdirs()
+    }
+
+    val recycleBinDir: File = File(
+        context?.noBackupFilesDir ?: context?.filesDir ?: lumaWorkspaceDir.parentFile ?: lumaWorkspaceDir,
+        ".luma_recycle_bin_v12"
+    ).apply {
+        if (!exists()) mkdirs()
+        val nomedia = File(this, ".nomedia")
+        if (!nomedia.exists()) runCatching { nomedia.createNewFile() }
+    }
+
+    private val recycleIndexFile: File
+        get() = File(recycleBinDir, ".recycle_index_v12.tsv")
+
+    companion object {
+        const val MAX_ZIP_ENTRIES = 50_000
+        const val MAX_ZIP_EXTRACTED_BYTES = 2L * 1024L * 1024L * 1024L // 2 GB safety ceiling
+        const val MAX_ZIP_COMPRESSION_RATIO = 100L
+        const val ZIP_RATIO_CHECK_THRESHOLD_BYTES = 10L * 1024L * 1024L // 10 MB
     }
 
     fun hasAllFilesAccessPermission(): Boolean {
@@ -87,8 +111,7 @@ class FileSystemAndFormatEngine(
 
     /**
      * Returns Internal Shared Storage (/storage/emulated/0) as the default path when accessible,
-     * or falls back to Internal Shared Storage path / Luma Workspace so the user starts in
-     * Internal Storage by default.
+     * or falls back to App Storage if Internal Shared Storage permission has not been granted yet.
      */
     fun getDefaultStartPath(): String {
         val extRoot = runCatching { Environment.getExternalStorageDirectory() }.getOrNull()
@@ -125,9 +148,9 @@ class FileSystemAndFormatEngine(
                 StorageVolumeRoot(
                     title = "Internal Storage",
                     subtitle = if (canListDirectly) {
-                        "${extRoot.absolutePath} • Full Access"
+                        extRoot.absolutePath
                     } else {
-                        "${extRoot.absolutePath} • Tap to Enable All Files Access"
+                        "${extRoot.absolutePath} • Permission Required"
                     },
                     path = extRoot.absolutePath,
                     totalBytes = extTotal,
@@ -147,12 +170,11 @@ class FileSystemAndFormatEngine(
                 val vTotal = volStat?.totalBytes ?: fallbackTotal
                 val vFree = volStat?.availableBytes ?: fallbackFree
                 if (index > 0) {
-                    // Removable SD Card detected!
                     val sdRoot = dir.absolutePath.substringBefore("/Android/data").let { File(it) }
                     val targetSdDir = if (sdRoot.exists() && sdRoot.canRead() && sdRoot.listFiles() != null) sdRoot else dir
                     roots.add(
                         StorageVolumeRoot(
-                            title = "SD Card Volume #$index",
+                            title = "SD Card #$index",
                             subtitle = targetSdDir.absolutePath,
                             path = targetSdDir.absolutePath,
                             totalBytes = vTotal,
@@ -173,24 +195,24 @@ class FileSystemAndFormatEngine(
                     .getOrDefault(perm.uri.lastPathSegment ?: "SAF Mount")
                 roots.add(
                     StorageVolumeRoot(
-                        title = "SAF Mount ($docId)",
+                        title = "SAF ($docId)",
                         subtitle = perm.uri.toString(),
                         path = perm.uri.toString(),
                         totalBytes = fallbackTotal,
                         freeBytes = fallbackFree,
                         isSafTree = true,
-                        isRemovableSd = docId.contains("primary", ignoreCase = true).not(),
+                        isRemovableSd = !docId.contains("primary", ignoreCase = true),
                         requiresAllFilesPermission = false
                     )
                 )
             }
         }
 
-        // 4. Luma Studio Sample Workspace (Pre-populated with DOCX, SQLite, CSV, PDF, ZIP, WAV, Code)
+        // 4. App Private Storage (Sandboxed internal app workspace)
         roots.add(
             StorageVolumeRoot(
-                title = "Luma Sample Studio",
-                subtitle = "Pre-loaded DOCX, SQLite, CSV, PDF, ZIP & Media Samples",
+                title = "App Storage",
+                subtitle = lumaWorkspaceDir.absolutePath,
                 path = lumaWorkspaceDir.absolutePath,
                 totalBytes = fallbackTotal,
                 freeBytes = fallbackFree,
@@ -201,6 +223,28 @@ class FileSystemAndFormatEngine(
         )
 
         return roots
+    }
+
+    /**
+     * Strictly validates that a directory exists, is a directory, is readable, and returns a
+     * non-null child array. NEVER silently treats an unreadable directory as empty.
+     */
+    fun requireReadableDirectoryChildren(dir: File): Array<File> {
+        if (!dir.exists()) {
+            throw IOException("Directory '${dir.absolutePath}' does not exist.")
+        }
+        if (!dir.isDirectory) {
+            throw IOException("Path '${dir.absolutePath}' is not a directory.")
+        }
+        if (!dir.canRead()) {
+            throw IOException(
+                "POSIX EACCES (Permission Denied): Directory '${dir.absolutePath}' is unreadable. Grant All Files Access or mount via SAF."
+            )
+        }
+        return dir.listFiles()
+            ?: throw IOException(
+                "POSIX EACCES (Permission Denied): Unable to list contents of '${dir.absolutePath}'. Grant All Files Access or mount via SAF."
+            )
     }
 
     suspend fun listDirectory(
@@ -237,14 +281,7 @@ class FileSystemAndFormatEngine(
     }
 
     private fun listDirectFileDirectory(dir: File, showHidden: Boolean): List<FileNode> {
-        if (!dir.exists()) {
-            throw IllegalStateException("Directory '${dir.absolutePath}' does not exist.")
-        }
-        val children = dir.listFiles()
-            ?: throw IllegalStateException(
-                "POSIX EACCES (Permission Denied): Unable to list '${dir.absolutePath}'. Tap 'Internal Storage' or 'Grant All Files Access' to allow full non-root device storage access."
-            )
-
+        val children = requireReadableDirectoryChildren(dir)
         return children
             .filter { showHidden || (!it.isHidden && !it.name.startsWith(".")) }
             .map { it.toFileNode() }
@@ -403,37 +440,150 @@ class FileSystemAndFormatEngine(
     // ==================== CROSS-VOLUME COPY, MOVE & BATCH OPERATIONS ====================
 
     /**
-     * Copies or moves a batch of files/folders across Internal Storage, Removable SD Cards,
-     * and Storage Access Framework (SAF) URIs with Conflict Resolution (KEEP_BOTH, OVERWRITE, SKIP).
+     * Validates that a directory is never copied or moved into itself or any of its descendants.
      */
+    private fun validateNotSelfOrDescendant(source: FileNode, destinationDirPathOrUri: String) {
+        if (!source.isDirectory) return
+        val destIsSaf = destinationDirPathOrUri.startsWith("content://")
+        if (!source.isSafDocument && !destIsSaf) {
+            val srcCanonical = File(source.path).canonicalFile
+            val dstDirCanonical = File(destinationDirPathOrUri).canonicalFile
+            val proposedTargetCanonical = File(dstDirCanonical, source.name).canonicalFile
+            val srcPrefix = srcCanonical.path + File.separator
+
+            if (dstDirCanonical == srcCanonical ||
+                dstDirCanonical.path.startsWith(srcPrefix) ||
+                proposedTargetCanonical == srcCanonical ||
+                proposedTargetCanonical.path.startsWith(srcPrefix)
+            ) {
+                throw IllegalArgumentException(
+                    "Invalid recursive operation: Cannot copy or move directory '${source.name}' into itself or any of its descendant directories ('${dstDirCanonical.path}')."
+                )
+            }
+        } else if (source.isSafDocument && destIsSaf) {
+            val srcUri = source.safUriString ?: source.path
+            if (destinationDirPathOrUri == srcUri ||
+                destinationDirPathOrUri.startsWith("$srcUri%2F") ||
+                destinationDirPathOrUri.startsWith("$srcUri/")
+            ) {
+                throw IllegalArgumentException(
+                    "Invalid recursive operation: Cannot copy or move SAF directory '${source.name}' into itself or any descendant."
+                )
+            }
+        }
+    }
+
     suspend fun copyOrMoveBatch(
         sourceNodes: List<FileNode>,
         destinationDirPathOrUri: String,
         isMove: Boolean,
         conflictPolicy: ConflictPolicy
-    ): Result<Int> = withContext(Dispatchers.IO) {
+    ): Result<Int> = copyOrMoveBatchWithUndo(
+        sourceNodes = sourceNodes,
+        destinationDirPathOrUri = destinationDirPathOrUri,
+        isMove = isMove,
+        conflictPolicy = conflictPolicy
+    ).map { it.processedCount }
+
+    /**
+     * Copies or moves a batch of files/folders across Internal Storage, Removable SD Cards,
+     * and Storage Access Framework (SAF) URIs with Conflict Resolution (KEEP_BOTH, OVERWRITE, SKIP),
+     * atomic temporary-file overwrite, self/descendant recursion protection, and verified move source deletion.
+     */
+    suspend fun copyOrMoveBatchWithUndo(
+        sourceNodes: List<FileNode>,
+        destinationDirPathOrUri: String,
+        isMove: Boolean,
+        conflictPolicy: ConflictPolicy
+    ): Result<CopyMoveBatchResult> = withContext(Dispatchers.IO) {
         try {
             var processedCount = 0
+            val createdDestPaths = mutableListOf<String>()
+            val movedPairs = mutableListOf<Pair<String, String>>()
             val destIsSaf = destinationDirPathOrUri.startsWith("content://")
 
+            // Pre-flight check: verify all source directories are readable and not copied/moved into themselves or descendants
             for (source in sourceNodes) {
-                if (source.path == destinationDirPathOrUri) continue
-                if (!source.isSafDocument && !destIsSaf && File(source.path).parentFile?.absolutePath == File(destinationDirPathOrUri).absolutePath && isMove) {
-                    continue
-                }
-                val copied = if (destIsSaf) {
-                    copyNodeToSafDirectory(source, Uri.parse(destinationDirPathOrUri), conflictPolicy)
-                } else {
-                    copyNodeToFileDirectory(source, File(destinationDirPathOrUri), conflictPolicy)
-                }
-                if (copied) {
-                    processedCount++
-                    if (isMove) {
-                        deleteFileOrDirectory(source)
+                validateNotSelfOrDescendant(source, destinationDirPathOrUri)
+                if (!source.isSafDocument) {
+                    val srcFile = File(source.path)
+                    if (!srcFile.exists()) {
+                        throw IOException("Source path '${source.path}' does not exist.")
+                    }
+                    if (source.isDirectory) {
+                        requireReadableDirectoryChildren(srcFile)
+                    } else if (!srcFile.canRead()) {
+                        throw IOException("POSIX EACCES: Source file '${source.path}' is not readable.")
                     }
                 }
             }
-            Result.success(processedCount)
+
+            for (source in sourceNodes) {
+                if (source.path == destinationDirPathOrUri) {
+                    if (source.isDirectory) {
+                        throw IllegalArgumentException("Cannot copy or move directory '${source.name}' into itself.")
+                    }
+                    continue
+                }
+                if (!source.isSafDocument && !destIsSaf) {
+                    val srcFile = File(source.path).canonicalFile
+                    val dstDir = File(destinationDirPathOrUri).canonicalFile
+                    if (srcFile.parentFile?.canonicalFile == dstDir && isMove) {
+                        // Moving a file into its current parent directory is a no-op
+                        continue
+                    }
+                }
+
+                val destPathOrUri: String? = if (destIsSaf) {
+                    copyNodeToSafDirectory(source, Uri.parse(destinationDirPathOrUri), conflictPolicy)
+                } else {
+                    copyNodeToFileDirectory(source, File(destinationDirPathOrUri), conflictPolicy)?.absolutePath
+                }
+
+                if (destPathOrUri != null) {
+                    if (isMove) {
+                        // Verify destination exists before deleting source
+                        if (!destIsSaf) {
+                            val writtenDest = File(destPathOrUri)
+                            if (!writtenDest.exists()) {
+                                throw IOException("Move aborted: destination '${writtenDest.absolutePath}' was not created.")
+                            }
+                            if (!source.isDirectory && !source.isSafDocument) {
+                                val expectedSize = File(source.path).length()
+                                if (writtenDest.length() != expectedSize) {
+                                    writtenDest.delete()
+                                    throw IOException("Move aborted: destination size (${writtenDest.length()}) did not match source size ($expectedSize).")
+                                }
+                            }
+                        }
+
+                        // Delete source and strictly verify source deletion before reporting move success
+                        val deleteResult = deleteFileOrDirectory(source)
+                        if (deleteResult.isFailure) {
+                            throw IOException(
+                                "Move failed: destination was written, but source '${source.path}' could not be deleted: ${deleteResult.exceptionOrNull()?.message}",
+                                deleteResult.exceptionOrNull()
+                            )
+                        }
+                        if (!source.isSafDocument && File(source.path).exists()) {
+                            throw IOException(
+                                "Move verification failed: source '${source.path}' still exists after deletion."
+                            )
+                        }
+                        movedPairs.add(Pair(destPathOrUri, source.path))
+                    } else {
+                        createdDestPaths.add(destPathOrUri)
+                    }
+                    processedCount++
+                }
+            }
+            Result.success(
+                CopyMoveBatchResult(
+                    processedCount = processedCount,
+                    createdDestinationPaths = createdDestPaths,
+                    movedPairs = movedPairs
+                )
+            )
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -443,43 +593,118 @@ class FileSystemAndFormatEngine(
         source: FileNode,
         destDir: File,
         conflictPolicy: ConflictPolicy
-    ): Boolean {
-        if (!destDir.exists()) destDir.mkdirs()
+    ): File? {
+        if (!destDir.exists() && !destDir.mkdirs() && !destDir.exists()) {
+            throw IOException("Failed to create destination directory '${destDir.absolutePath}'.")
+        }
+        if (source.isDirectory && !source.isSafDocument) {
+            validateNotSelfOrDescendant(source, destDir.absolutePath)
+        }
+
         var targetFile = File(destDir, source.name)
 
         if (targetFile.exists()) {
             when (conflictPolicy) {
-                ConflictPolicy.SKIP -> return false
-                ConflictPolicy.OVERWRITE -> {
-                    if (targetFile.isDirectory) targetFile.deleteRecursively() else targetFile.delete()
-                }
+                ConflictPolicy.SKIP -> return null
                 ConflictPolicy.KEEP_BOTH -> {
                     targetFile = resolveUniqueDestinationFile(destDir, source.name, source.isDirectory)
+                }
+                ConflictPolicy.OVERWRITE -> {
+                    if (!source.isSafDocument && File(source.path).canonicalFile == targetFile.canonicalFile) {
+                        // Never overwrite a file with itself in-place; create a Keep-Both copy instead
+                        targetFile = resolveUniqueDestinationFile(destDir, source.name, source.isDirectory)
+                    }
                 }
             }
         }
 
         if (source.isDirectory) {
-            targetFile.mkdirs()
+            if (targetFile.exists() && !targetFile.isDirectory) {
+                if (conflictPolicy == ConflictPolicy.OVERWRITE) {
+                    if (!targetFile.delete()) {
+                        throw IOException("Unable to replace existing file '${targetFile.absolutePath}' with directory.")
+                    }
+                }
+            }
+            if (!targetFile.exists() && !targetFile.mkdirs() && !targetFile.exists()) {
+                throw IOException("Unable to create target directory '${targetFile.absolutePath}'.")
+            }
+
             if (source.isSafDocument) {
                 val children = listSafTreeDirectory(Uri.parse(source.safUriString ?: source.path), showHidden = true)
                 children.forEach { child ->
                     copyNodeToFileDirectory(child, targetFile, conflictPolicy)
                 }
             } else {
-                File(source.path).listFiles()?.forEach { childFile ->
+                val children = requireReadableDirectoryChildren(File(source.path))
+                children.forEach { childFile ->
                     copyNodeToFileDirectory(childFile.toFileNode(), targetFile, conflictPolicy)
                 }
             }
-            return true
+            return targetFile
         } else {
-            openNodeInputStream(source).use { input ->
-                BufferedOutputStream(FileOutputStream(targetFile), 64 * 1024).use { output ->
-                    input.copyTo(output, 64 * 1024)
-                    output.flush()
+            // Atomic file copy/overwrite using a temporary destination file in the target folder
+            val tempTarget = File(destDir, ".luma_atomic_${UUID.randomUUID()}.tmp")
+            try {
+                openNodeInputStream(source).use { input ->
+                    FileOutputStream(tempTarget).use { fos ->
+                        BufferedOutputStream(fos, 64 * 1024).use { output ->
+                            input.copyTo(output, 64 * 1024)
+                            output.flush()
+                        }
+                        runCatching { fos.fd.sync() }
+                    }
+                }
+
+                // Atomically replace targetFile with tempTarget
+                atomicReplaceFile(tempTarget, targetFile)
+                return targetFile
+            } catch (e: Exception) {
+                if (tempTarget.exists()) tempTarget.delete()
+                throw e
+            }
+        }
+    }
+
+    /**
+     * Atomically replaces [targetFile] with [tempFile]. If [targetFile] already exists, uses POSIX
+     * rename or a rollback-safe backup swap so [targetFile] is never left corrupted or missing on failure.
+     */
+    private fun atomicReplaceFile(tempFile: File, targetFile: File) {
+        if (targetFile.exists() && targetFile.isDirectory) {
+            if (!targetFile.deleteRecursively()) {
+                throw IOException("Unable to overwrite directory '${targetFile.absolutePath}' with file.")
+            }
+        }
+        // Fast path: POSIX renameTo atomically replaces targetFile on most Android filesystems
+        if (tempFile.renameTo(targetFile)) {
+            return
+        }
+        // Fallback path with rollback backup if renameTo requires target not to exist
+        val backupFile = if (targetFile.exists()) {
+            File(targetFile.parentFile, ".luma_bak_${UUID.randomUUID()}.tmp").also { bak ->
+                if (!targetFile.renameTo(bak)) {
+                    tempFile.copyTo(targetFile, overwrite = true)
+                    tempFile.delete()
+                    return
                 }
             }
-            return true
+        } else null
+
+        if (tempFile.renameTo(targetFile)) {
+            backupFile?.delete()
+        } else {
+            try {
+                tempFile.copyTo(targetFile, overwrite = true)
+                tempFile.delete()
+                backupFile?.delete()
+            } catch (e: Exception) {
+                // Roll back original file if replacement failed
+                if (backupFile != null && backupFile.exists() && !targetFile.exists()) {
+                    backupFile.renameTo(targetFile)
+                }
+                throw e
+            }
         }
     }
 
@@ -487,7 +712,7 @@ class FileSystemAndFormatEngine(
         source: FileNode,
         destTreeOrDocUri: Uri,
         conflictPolicy: ConflictPolicy
-    ): Boolean {
+    ): String? {
         val resolver = context?.contentResolver
             ?: throw IllegalStateException("ContentResolver required for SAF write operations.")
         val parentDocUri = if (DocumentsContract.isDocumentUri(context, destTreeOrDocUri)) {
@@ -505,20 +730,24 @@ class FileSystemAndFormatEngine(
 
         if (collision != null) {
             when (conflictPolicy) {
-                ConflictPolicy.SKIP -> return false
+                ConflictPolicy.SKIP -> return null
                 ConflictPolicy.OVERWRITE -> {
-                    DocumentsContract.deleteDocument(resolver, Uri.parse(collision.safUriString ?: collision.path))
+                    // For SAF overwrite, write to a temporary document name first, then remove old and rename
+                    effectiveName = source.name
                 }
                 ConflictPolicy.KEEP_BOTH -> {
                     val base = source.name.substringBeforeLast('.', source.name)
                     val ext = source.name.substringAfterLast('.', "")
                     val suffix = if (ext.isNotEmpty() && !source.isDirectory) ".$ext" else ""
-                    effectiveName = "${base}_copy_${System.currentTimeMillis() % 10000}$suffix"
+                    effectiveName = "${base}_(1)$suffix"
                 }
             }
         }
 
         if (source.isDirectory) {
+            if (collision != null && conflictPolicy == ConflictPolicy.OVERWRITE) {
+                DocumentsContract.deleteDocument(resolver, Uri.parse(collision.safUriString ?: collision.path))
+            }
             val newDirUri = DocumentsContract.createDocument(
                 resolver,
                 parentDocUri,
@@ -529,27 +758,42 @@ class FileSystemAndFormatEngine(
             val children = if (source.isSafDocument) {
                 listSafTreeDirectory(Uri.parse(source.safUriString ?: source.path), showHidden = true)
             } else {
-                File(source.path).listFiles()?.map { it.toFileNode() } ?: emptyList()
+                requireReadableDirectoryChildren(File(source.path)).map { it.toFileNode() }
             }
             children.forEach { child ->
                 copyNodeToSafDirectory(child, newDirUri, conflictPolicy)
             }
-            return true
+            return newDirUri.toString()
         } else {
+            val stagingName = if (collision != null && conflictPolicy == ConflictPolicy.OVERWRITE) {
+                ".luma_saf_tmp_${UUID.randomUUID()}_${source.name}"
+            } else {
+                effectiveName
+            }
             val newDocUri = DocumentsContract.createDocument(
                 resolver,
                 parentDocUri,
                 source.mimeType.ifBlank { "application/octet-stream" },
-                effectiveName
+                stagingName
             ) ?: throw IllegalStateException("SAF provider refused file creation for '$effectiveName'")
 
-            openNodeInputStream(source).use { input ->
-                resolver.openOutputStream(newDocUri, "w")?.use { output ->
-                    input.copyTo(output, 64 * 1024)
-                    output.flush()
-                } ?: throw IllegalStateException("Unable to open SAF output stream for '$effectiveName'")
+            try {
+                openNodeInputStream(source).use { input ->
+                    resolver.openOutputStream(newDocUri, "w")?.use { output ->
+                        input.copyTo(output, 64 * 1024)
+                        output.flush()
+                    } ?: throw IllegalStateException("Unable to open SAF output stream for '$effectiveName'")
+                }
+                if (collision != null && conflictPolicy == ConflictPolicy.OVERWRITE) {
+                    DocumentsContract.deleteDocument(resolver, Uri.parse(collision.safUriString ?: collision.path))
+                    val renamedUri = DocumentsContract.renameDocument(resolver, newDocUri, effectiveName)
+                    return (renamedUri ?: newDocUri).toString()
+                }
+                return newDocUri.toString()
+            } catch (e: Exception) {
+                runCatching { DocumentsContract.deleteDocument(resolver, newDocUri) }
+                throw e
             }
-            return true
         }
     }
 
@@ -576,7 +820,11 @@ class FileSystemAndFormatEngine(
                 64 * 1024
             )
         } else {
-            BufferedInputStream(FileInputStream(File(node.path)), 64 * 1024)
+            val f = File(node.path)
+            if (!f.exists() || !f.canRead()) {
+                throw IOException("POSIX EACCES: Cannot read file '${node.path}'.")
+            }
+            BufferedInputStream(FileInputStream(f), 64 * 1024)
         }
     }
 
@@ -594,33 +842,85 @@ class FileSystemAndFormatEngine(
         }
     }
 
+    /**
+     * Hardened ZIP Creation Engine:
+     * 1. Rejects path traversal characters in archiveName.
+     * 2. Excludes the output .zip file and .tmp staging file if compressing a directory into itself.
+     * 3. Detects and prevents symlink directory loops via canonical path tracking.
+     * 4. Fails explicitly on unreadable directories instead of silently omitting files.
+     * 5. Writes to an atomic staging file and renames only upon full stream completion.
+     */
     suspend fun compressNodesToZip(
         sourceNodes: List<FileNode>,
         destinationDirPathOrUri: String,
         archiveName: String
     ): Result<FileNode> = withContext(Dispatchers.IO) {
-        try {
-            val cleanName = if (archiveName.endsWith(".zip", ignoreCase = true)) archiveName else "$archiveName.zip"
-            val destIsSaf = destinationDirPathOrUri.startsWith("content://")
-            val tempZip = File(
-                context?.cacheDir ?: lumaWorkspaceDir,
-                "batch_pack_${System.currentTimeMillis()}_$cleanName"
+        val trimmedArchive = archiveName.trim()
+        if (trimmedArchive.isEmpty() ||
+            trimmedArchive.contains("..") ||
+            trimmedArchive.contains("/") ||
+            trimmedArchive.contains("\\")
+        ) {
+            return@withContext Result.failure(
+                SecurityException("Invalid ZIP archive name '$archiveName': Path separators and '..' are prohibited.")
             )
+        }
+        val cleanName = if (trimmedArchive.endsWith(".zip", ignoreCase = true)) trimmedArchive else "$trimmedArchive.zip"
+        val destIsSaf = destinationDirPathOrUri.startsWith("content://")
+        val destDirFile = if (!destIsSaf) File(destinationDirPathOrUri).apply { if (!exists()) mkdirs() } else null
+        val finalZipFile = destDirFile?.let { resolveUniqueOrTargetFile(it, cleanName) }
+        val tempZip = File(
+            destDirFile ?: context?.cacheDir ?: lumaWorkspaceDir,
+            ".luma_zip_${UUID.randomUUID()}.tmp"
+        )
 
+        val excludedCanonicalPaths = mutableSetOf<String>().apply {
+            runCatching { add(tempZip.canonicalPath) }
+            finalZipFile?.let { runCatching { add(it.canonicalPath) } }
+        }
+        val activeBranchCanonicalDirs = mutableSetOf<String>()
+
+        try {
             ZipOutputStream(BufferedOutputStream(FileOutputStream(tempZip), 64 * 1024)).use { zos ->
                 val buffer = ByteArray(64 * 1024)
 
+                fun sanitizeEntrySegment(name: String): String {
+                    val clean = name.replace('\\', '/').trim('/').split('/')
+                        .filter { it.isNotEmpty() && it != "." && it != ".." }
+                        .joinToString("_")
+                    if (clean.isEmpty()) throw SecurityException("Invalid ZIP entry segment '$name'")
+                    return clean
+                }
+
                 fun addNodeToZip(node: FileNode, prefixPath: String) {
-                    val entryPath = if (prefixPath.isEmpty()) node.name else "$prefixPath/${node.name}"
-                    if (node.isDirectory) {
-                        zos.putNextEntry(ZipEntry("$entryPath/"))
-                        zos.closeEntry()
-                        val children = if (node.isSafDocument) {
-                            listSafTreeDirectory(Uri.parse(node.safUriString ?: node.path), showHidden = true)
-                        } else {
-                            File(node.path).listFiles()?.map { it.toFileNode() } ?: emptyList()
+                    if (!node.isSafDocument) {
+                        val nodeCanonical = File(node.path).canonicalPath
+                        if (nodeCanonical in excludedCanonicalPaths) {
+                            // Skip the target .zip file or staging .tmp file to prevent infinite self-inclusion
+                            return
                         }
-                        children.forEach { child -> addNodeToZip(child, entryPath) }
+                    }
+
+                    val safeSegment = sanitizeEntrySegment(node.name)
+                    val entryPath = if (prefixPath.isEmpty()) safeSegment else "$prefixPath/$safeSegment"
+
+                    if (node.isDirectory) {
+                        val dirCanonical = if (!node.isSafDocument) File(node.path).canonicalPath else node.path
+                        if (!activeBranchCanonicalDirs.add(dirCanonical)) {
+                            throw SecurityException("Detected cyclical directory reference at '${node.path}' during ZIP creation.")
+                        }
+                        try {
+                            zos.putNextEntry(ZipEntry("$entryPath/"))
+                            zos.closeEntry()
+                            val children = if (node.isSafDocument) {
+                                listSafTreeDirectory(Uri.parse(node.safUriString ?: node.path), showHidden = true)
+                            } else {
+                                requireReadableDirectoryChildren(File(node.path)).map { it.toFileNode() }
+                            }
+                            children.forEach { child -> addNodeToZip(child, entryPath) }
+                        } finally {
+                            activeBranchCanonicalDirs.remove(dirCanonical)
+                        }
                     } else {
                         zos.putNextEntry(ZipEntry(entryPath))
                         openNodeInputStream(node).use { input ->
@@ -634,22 +934,23 @@ class FileSystemAndFormatEngine(
                 }
 
                 sourceNodes.forEach { node -> addNodeToZip(node, "") }
+                zos.flush()
             }
 
             if (destIsSaf) {
-                val tempNode = tempZip.copyTo(File(tempZip.parentFile, cleanName), overwrite = true).toFileNode()
-                copyNodeToSafDirectory(tempNode, Uri.parse(destinationDirPathOrUri), ConflictPolicy.KEEP_BOTH)
-                tempZip.delete()
-                File(tempNode.path).delete()
-                Result.success(tempNode.copy(name = cleanName))
+                val namedTemp = File(tempZip.parentFile, cleanName)
+                atomicReplaceFile(tempZip, namedTemp)
+                val tempNode = namedTemp.toFileNode()
+                val safUriStr = copyNodeToSafDirectory(tempNode, Uri.parse(destinationDirPathOrUri), ConflictPolicy.KEEP_BOTH)
+                namedTemp.delete()
+                Result.success(tempNode.copy(name = cleanName, path = safUriStr ?: tempNode.path, isSafDocument = true, safUriString = safUriStr))
             } else {
-                val destDir = File(destinationDirPathOrUri).apply { if (!exists()) mkdirs() }
-                val finalZip = resolveUniqueOrTargetFile(destDir, cleanName)
-                tempZip.copyTo(finalZip, overwrite = true)
-                tempZip.delete()
-                Result.success(finalZip.toFileNode())
+                val targetZip = finalZipFile!!
+                atomicReplaceFile(tempZip, targetZip)
+                Result.success(targetZip.toFileNode())
             }
         } catch (e: Exception) {
+            if (tempZip.exists()) tempZip.delete()
             Result.failure(e)
         }
     }
@@ -1513,31 +1814,102 @@ class FileSystemAndFormatEngine(
         )
     }
 
+    /**
+     * Hardened ZIP Extraction Engine:
+     * 1. Rejects Zip-Slip path traversal ('..', absolute paths, or canonical paths escaping destRoot + File.separator).
+     * 2. Defends against Zip-Bombs via max entry count, max total extracted bytes, and max compression ratio checks.
+     * 3. Uses atomic temporary staging files per extracted entry.
+     */
     suspend fun extractZipArchive(node: FileNode, targetDir: File): Result<Int> = withContext(Dispatchers.IO) {
+        val zipFile = try {
+            resolveLocalFileForStudio(node)
+        } catch (e: Exception) {
+            return@withContext Result.failure(e)
+        }
+        val destRoot = File(targetDir, zipFile.nameWithoutExtension + "_extracted").apply { mkdirs() }
+        val destRootCanonical = destRoot.canonicalFile
+        val destPrefix = destRootCanonical.path + File.separator
+
+        var extractedCount = 0
+        var totalEntriesSeen = 0
+        var totalExtractedBytes = 0L
+
         try {
-            val zipFile = resolveLocalFileForStudio(node)
-            val destRoot = File(targetDir, zipFile.nameWithoutExtension + "_extracted").apply { mkdirs() }
-            var extractedCount = 0
             ZipInputStream(BufferedInputStream(FileInputStream(zipFile))).use { zis ->
                 var entry: ZipEntry?
                 val buffer = ByteArray(64 * 1024)
                 while (zis.nextEntry.also { entry = it } != null) {
                     val current = entry!!
-                    val outFile = File(destRoot, current.name)
-                    if (!outFile.canonicalPath.startsWith(destRoot.canonicalPath)) {
-                        throw SecurityException("Blocked Zip-Slip path traversal entry: ${current.name}")
+                    totalEntriesSeen++
+                    if (totalEntriesSeen > MAX_ZIP_ENTRIES) {
+                        throw SecurityException(
+                            "Blocked potential Zip-Bomb: archive exceeds maximum allowed entry count ($MAX_ZIP_ENTRIES)."
+                        )
                     }
+
+                    val rawEntryName = current.name
+                    val normalizedSegments = rawEntryName.replace('\\', '/').split('/')
+                    if (rawEntryName.isBlank() ||
+                        rawEntryName.startsWith("/") ||
+                        rawEntryName.startsWith("\\") ||
+                        rawEntryName.contains(":\\") ||
+                        normalizedSegments.any { it == ".." }
+                    ) {
+                        throw SecurityException("Blocked Zip-Slip path traversal entry: '$rawEntryName'")
+                    }
+
+                    val outFile = File(destRootCanonical, rawEntryName)
+                    val outCanonical = outFile.canonicalFile
+                    if (outCanonical != destRootCanonical && !outCanonical.path.startsWith(destPrefix)) {
+                        throw SecurityException(
+                            "Blocked Zip-Slip canonical boundary violation: '$rawEntryName' resolved outside destination root."
+                        )
+                    }
+
                     if (current.isDirectory) {
-                        outFile.mkdirs()
+                        outCanonical.mkdirs()
                     } else {
-                        outFile.parentFile?.mkdirs()
-                        BufferedOutputStream(FileOutputStream(outFile)).use { bos ->
-                            var len: Int
-                            while (zis.read(buffer).also { len = it } > 0) {
-                                bos.write(buffer, 0, len)
-                            }
+                        val parentDir = outCanonical.parentFile
+                        if (parentDir != null && !parentDir.exists() && !parentDir.mkdirs() && !parentDir.exists()) {
+                            throw IOException("Failed to create parent directory '${parentDir.absolutePath}' for ZIP extraction.")
                         }
-                        extractedCount++
+                        val tempEntryFile = File(
+                            parentDir ?: destRootCanonical,
+                            ".luma_unzip_${UUID.randomUUID()}.tmp"
+                        )
+                        var entryExtractedBytes = 0L
+                        val declaredCompressed = current.compressedSize
+
+                        try {
+                            BufferedOutputStream(FileOutputStream(tempEntryFile), 64 * 1024).use { bos ->
+                                var len: Int
+                                while (zis.read(buffer).also { len = it } > 0) {
+                                    entryExtractedBytes += len
+                                    totalExtractedBytes += len
+
+                                    if (totalExtractedBytes > MAX_ZIP_EXTRACTED_BYTES) {
+                                        throw SecurityException(
+                                            "Blocked potential Zip-Bomb: extracted bytes exceeded safety limit (${MAX_ZIP_EXTRACTED_BYTES / (1024 * 1024)} MB)."
+                                        )
+                                    }
+                                    if (declaredCompressed > 0L &&
+                                        entryExtractedBytes > ZIP_RATIO_CHECK_THRESHOLD_BYTES &&
+                                        (entryExtractedBytes / declaredCompressed) > MAX_ZIP_COMPRESSION_RATIO
+                                    ) {
+                                        throw SecurityException(
+                                            "Blocked potential Zip-Bomb: suspicious compression ratio (> ${MAX_ZIP_COMPRESSION_RATIO}:1) on entry '$rawEntryName'."
+                                        )
+                                    }
+                                    bos.write(buffer, 0, len)
+                                }
+                                bos.flush()
+                            }
+                            atomicReplaceFile(tempEntryFile, outCanonical)
+                            extractedCount++
+                        } catch (e: Exception) {
+                            if (tempEntryFile.exists()) tempEntryFile.delete()
+                            throw e
+                        }
                     }
                     zis.closeEntry()
                 }
@@ -1554,39 +1926,46 @@ class FileSystemAndFormatEngine(
         entryContent: String
     ): Result<FileNode> = withContext(Dispatchers.IO) {
         try {
+            val cleanEntry = entryFileName.trim().replace('\\', '/').trimStart('/')
+            if (cleanEntry.isEmpty() || cleanEntry.split('/').any { it == ".." || it == "." }) {
+                throw SecurityException("Invalid ZIP entry path '$entryFileName': '..' segments are prohibited.")
+            }
+
             val sourceZip = resolveLocalFileForStudio(node)
-            val tempZip = File(sourceZip.parentFile, ".${sourceZip.name}.repack_tmp")
+            val tempZip = File(sourceZip.parentFile, ".${sourceZip.name}.repack_${UUID.randomUUID()}.tmp")
             val payloadBytes = entryContent.toByteArray(Charsets.UTF_8)
 
-            ZipInputStream(BufferedInputStream(FileInputStream(sourceZip))).use { zis ->
-                ZipOutputStream(BufferedOutputStream(FileOutputStream(tempZip))).use { zos ->
-                    var entry: ZipEntry?
-                    val buffer = ByteArray(32 * 1024)
-                    while (zis.nextEntry.also { entry = it } != null) {
-                        val current = entry!!
-                        if (current.name == entryFileName) continue
-                        zos.putNextEntry(ZipEntry(current.name))
-                        var len: Int
-                        while (zis.read(buffer).also { len = it } > 0) {
-                            zos.write(buffer, 0, len)
+            try {
+                ZipInputStream(BufferedInputStream(FileInputStream(sourceZip))).use { zis ->
+                    ZipOutputStream(BufferedOutputStream(FileOutputStream(tempZip))).use { zos ->
+                        var entry: ZipEntry?
+                        val buffer = ByteArray(32 * 1024)
+                        while (zis.nextEntry.also { entry = it } != null) {
+                            val current = entry!!
+                            if (current.name == cleanEntry) continue
+                            zos.putNextEntry(ZipEntry(current.name))
+                            var len: Int
+                            while (zis.read(buffer).also { len = it } > 0) {
+                                zos.write(buffer, 0, len)
+                            }
+                            zos.closeEntry()
                         }
+                        val newEntry = ZipEntry(cleanEntry).apply {
+                            size = payloadBytes.size.toLong()
+                            crc = CRC32().apply { update(payloadBytes) }.value
+                        }
+                        zos.putNextEntry(newEntry)
+                        zos.write(payloadBytes)
                         zos.closeEntry()
                     }
-                    val newEntry = ZipEntry(entryFileName).apply {
-                        size = payloadBytes.size.toLong()
-                        crc = CRC32().apply { update(payloadBytes) }.value
-                    }
-                    zos.putNextEntry(newEntry)
-                    zos.write(payloadBytes)
-                    zos.closeEntry()
                 }
+                atomicReplaceFile(tempZip, sourceZip)
+                syncTempFileBackToNodeIfSaf(node, sourceZip)
+                Result.success(if (node.isSafDocument) node.copy(sizeBytes = sourceZip.length()) else sourceZip.toFileNode())
+            } catch (e: Exception) {
+                if (tempZip.exists()) tempZip.delete()
+                throw e
             }
-            if (!tempZip.renameTo(sourceZip)) {
-                tempZip.copyTo(sourceZip, overwrite = true)
-                tempZip.delete()
-            }
-            syncTempFileBackToNodeIfSaf(node, sourceZip)
-            Result.success(if (node.isSafDocument) node.copy(sizeBytes = sourceZip.length()) else sourceZip.toFileNode())
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -1742,7 +2121,7 @@ class FileSystemAndFormatEngine(
         }
     }
 
-    // ==================== FILE OPERATIONS & ADVANCED TOOLS ====================
+    // ==================== FILE OPERATIONS, RECYCLE BIN & UNDO ENGINE ====================
 
     suspend fun createNewFileOrFolder(
         parentPathOrUri: String,
@@ -1752,8 +2131,8 @@ class FileSystemAndFormatEngine(
     ): Result<FileNode> = withContext(Dispatchers.IO) {
         try {
             val cleanName = name.trim()
-            require(cleanName.isNotEmpty() && !cleanName.contains("/")) {
-                "Invalid name '$name': File/folder names cannot be empty or contain path separators ('/')."
+            require(cleanName.isNotEmpty() && !cleanName.contains("/") && !cleanName.contains("\\") && cleanName != "..") {
+                "Invalid name '$name': File/folder names cannot be empty or contain path separators."
             }
 
             if (parentPathOrUri.startsWith("content://")) {
@@ -1811,11 +2190,11 @@ class FileSystemAndFormatEngine(
                     cleanName.endsWith(".docx", ignoreCase = true) -> {
                         WorkspaceSeedEngine.createSampleDocx(
                             target,
-                            listOf(initialContent.ifBlank { "New Word OOXML Document created in Luma Files Studio v1.1.0." })
+                            listOf(initialContent.ifBlank { "Document paragraph." })
                         )
                     }
                     cleanName.endsWith(".csv", ignoreCase = true) -> {
-                        target.writeText(initialContent.ifBlank { "Column_A,Column_B,Column_C\nValue_1,Value_2,Value_3" })
+                        target.writeText(initialContent.ifBlank { "Column_A,Column_B,Column_C\n" })
                     }
                     else -> {
                         target.writeText(initialContent)
@@ -1835,13 +2214,13 @@ class FileSystemAndFormatEngine(
                     ?: throw IllegalStateException("ContentResolver required for SAF deletion.")
                 val uri = Uri.parse(node.safUriString ?: node.path)
                 val deleted = DocumentsContract.deleteDocument(resolver, uri)
-                if (!deleted) throw IllegalStateException("SAF provider refused deletion for ${node.name}")
+                if (!deleted) throw IOException("SAF provider refused deletion for ${node.name}")
             } else {
                 val target = File(node.path)
                 if (!target.exists()) return@withContext Result.success(Unit)
                 val ok = target.deleteRecursively()
-                if (!ok) {
-                    throw IllegalStateException("POSIX EACCES: Unable to delete '${target.absolutePath}'.")
+                if (!ok || target.exists()) {
+                    throw IOException("POSIX EACCES: Unable to delete '${target.absolutePath}'.")
                 }
             }
             Result.success(Unit)
@@ -1850,10 +2229,231 @@ class FileSystemAndFormatEngine(
         }
     }
 
+    /**
+     * Permanently shreds (zero-overwrites) and unlinks one or more files/directories so they cannot
+     * be recovered by forensic scanners.
+     */
+    suspend fun permanentlyShredNodes(nodes: List<FileNode>): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            var count = 0
+            for (node in nodes) {
+                if (node.isSafDocument) {
+                    deleteFileOrDirectory(node).getOrThrow()
+                } else {
+                    val file = File(node.path)
+                    if (file.exists()) {
+                        cryptoEngine.shredAndDeleteFile(file)
+                        if (file.exists()) {
+                            throw IOException("Unable to permanently shred '${file.absolutePath}'.")
+                        }
+                    }
+                }
+                count++
+            }
+            Result.success(count)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Moves one or more files/directories into the isolated Recycle Bin with full original path
+     * metadata so they can be restored via one-tap Undo or from the Recycle Bin sheet.
+     */
+    suspend fun moveToRecycleBin(nodes: List<FileNode>): Result<List<RecycleBinItem>> = withContext(Dispatchers.IO) {
+        try {
+            if (!recycleBinDir.exists()) recycleBinDir.mkdirs()
+            val currentItems = loadRecycleBinIndex().toMutableList()
+            val newlyTrashed = mutableListOf<RecycleBinItem>()
+
+            for (node in nodes) {
+                val id = UUID.randomUUID().toString().replace("-", "").take(16)
+                val safeName = node.name.replace('/', '_').replace('\\', '_').replace('\t', '_')
+                val trashTarget = File(recycleBinDir, "${id}_$safeName")
+
+                if (node.isSafDocument) {
+                    copyNodeToFileDirectory(node, recycleBinDir, ConflictPolicy.KEEP_BOTH)?.let { copied ->
+                        copied.renameTo(trashTarget)
+                    } ?: throw IOException("Failed to copy SAF item '${node.name}' to Recycle Bin.")
+                    deleteFileOrDirectory(node).getOrThrow()
+                } else {
+                    val srcFile = File(node.path)
+                    if (!srcFile.exists()) continue
+                    if (srcFile.isDirectory) {
+                        requireReadableDirectoryChildren(srcFile)
+                    }
+                    // Try instant atomic rename on same mount; fall back to copy + verified delete across mounts
+                    val movedDirectly = srcFile.renameTo(trashTarget)
+                    if (!movedDirectly) {
+                        val copied = copyNodeToFileDirectory(node, recycleBinDir, ConflictPolicy.KEEP_BOTH)
+                            ?: throw IOException("Failed to stage '${node.name}' into Recycle Bin.")
+                        if (copied != trashTarget) {
+                            atomicReplaceFile(copied, trashTarget)
+                        }
+                        if (!srcFile.deleteRecursively() || srcFile.exists()) {
+                            trashTarget.deleteRecursively()
+                            throw IOException("Recycle Bin move failed: source '${srcFile.absolutePath}' could not be removed.")
+                        }
+                    }
+                }
+
+                val item = RecycleBinItem(
+                    id = id,
+                    originalName = node.name,
+                    originalPath = node.path,
+                    trashStoragePath = trashTarget.absolutePath,
+                    isDirectory = node.isDirectory,
+                    sizeBytes = node.sizeBytes,
+                    deletedAtMillis = System.currentTimeMillis(),
+                    mimeType = node.mimeType
+                )
+                currentItems.add(0, item)
+                newlyTrashed.add(item)
+            }
+
+            saveRecycleBinIndex(currentItems)
+            Result.success(newlyTrashed)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    fun listRecycleBinItems(): List<RecycleBinItem> {
+        return loadRecycleBinIndex().filter { File(it.trashStoragePath).exists() }
+    }
+
+    suspend fun restoreFromRecycleBin(
+        item: RecycleBinItem,
+        conflictPolicy: ConflictPolicy = ConflictPolicy.KEEP_BOTH
+    ): Result<FileNode> = withContext(Dispatchers.IO) {
+        try {
+            val trashFile = File(item.trashStoragePath)
+            if (!trashFile.exists()) {
+                throw IOException("Recycle Bin payload for '${item.originalName}' no longer exists.")
+            }
+
+            val destFile = if (item.originalPath.startsWith("content://")) {
+                File(lumaWorkspaceDir, item.originalName)
+            } else {
+                File(item.originalPath)
+            }
+            val parentDir = destFile.parentFile ?: lumaWorkspaceDir
+            if (!parentDir.exists() && !parentDir.mkdirs() && !parentDir.exists()) {
+                throw IOException("Unable to recreate original parent folder '${parentDir.absolutePath}'.")
+            }
+
+            val finalTarget = if (destFile.exists()) {
+                when (conflictPolicy) {
+                    ConflictPolicy.KEEP_BOTH -> resolveUniqueDestinationFile(parentDir, item.originalName, item.isDirectory)
+                    ConflictPolicy.OVERWRITE -> destFile
+                    ConflictPolicy.SKIP -> return@withContext Result.failure(
+                        IllegalStateException("Skipped restore because '${destFile.absolutePath}' already exists.")
+                    )
+                }
+            } else {
+                destFile
+            }
+
+            if (item.isDirectory) {
+                if (!trashFile.renameTo(finalTarget)) {
+                    copyNodeToFileDirectory(trashFile.toFileNode().copy(name = finalTarget.name), parentDir, ConflictPolicy.OVERWRITE)
+                    trashFile.deleteRecursively()
+                }
+            } else {
+                atomicReplaceFile(trashFile, finalTarget)
+            }
+
+            val updatedIndex = loadRecycleBinIndex().filterNot { it.id == item.id }
+            saveRecycleBinIndex(updatedIndex)
+            Result.success(finalTarget.toFileNode())
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun permanentlyShredRecycleBinItem(itemId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val items = loadRecycleBinIndex().toMutableList()
+            val target = items.firstOrNull { it.id == itemId }
+            if (target != null) {
+                val f = File(target.trashStoragePath)
+                if (f.exists()) {
+                    cryptoEngine.shredAndDeleteFile(f)
+                }
+                items.removeAll { it.id == itemId }
+                saveRecycleBinIndex(items)
+            }
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun emptyRecycleBin(): Result<Int> = withContext(Dispatchers.IO) {
+        try {
+            val items = loadRecycleBinIndex()
+            var count = 0
+            for (item in items) {
+                val f = File(item.trashStoragePath)
+                if (f.exists()) {
+                    cryptoEngine.shredAndDeleteFile(f)
+                    count++
+                }
+            }
+            saveRecycleBinIndex(emptyList())
+            Result.success(count)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun loadRecycleBinIndex(): List<RecycleBinItem> {
+        if (!recycleIndexFile.exists()) return emptyList()
+        return runCatching {
+            recycleIndexFile.readLines(Charsets.UTF_8)
+                .filter { it.isNotBlank() }
+                .mapNotNull { line ->
+                    val parts = line.split('\t')
+                    if (parts.size < 8) null
+                    else RecycleBinItem(
+                        id = parts[0],
+                        originalName = parts[1],
+                        originalPath = parts[2],
+                        trashStoragePath = parts[3],
+                        isDirectory = parts[4].toBoolean(),
+                        sizeBytes = parts[5].toLongOrNull() ?: 0L,
+                        deletedAtMillis = parts[6].toLongOrNull() ?: 0L,
+                        mimeType = parts[7]
+                    )
+                }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun saveRecycleBinIndex(items: List<RecycleBinItem>) {
+        if (!recycleBinDir.exists()) recycleBinDir.mkdirs()
+        val tempFile = File(recycleBinDir, ".recycle_index_tmp_${UUID.randomUUID()}.tsv")
+        val content = items.joinToString("\n") { item ->
+            listOf(
+                item.id,
+                item.originalName.replace('\t', ' ').replace('\n', ' '),
+                item.originalPath.replace('\t', ' ').replace('\n', ' '),
+                item.trashStoragePath.replace('\t', ' ').replace('\n', ' '),
+                item.isDirectory.toString(),
+                item.sizeBytes.toString(),
+                item.deletedAtMillis.toString(),
+                item.mimeType.replace('\t', ' ').replace('\n', ' ')
+            ).joinToString("\t")
+        }
+        tempFile.writeText(content, Charsets.UTF_8)
+        atomicReplaceFile(tempFile, recycleIndexFile)
+    }
+
     suspend fun renameFile(node: FileNode, newName: String): Result<FileNode> = withContext(Dispatchers.IO) {
         try {
             val clean = newName.trim()
-            require(clean.isNotEmpty() && !clean.contains("/")) { "Invalid target filename '$newName'." }
+            require(clean.isNotEmpty() && !clean.contains("/") && !clean.contains("\\") && clean != "..") {
+                "Invalid target filename '$newName'."
+            }
             if (node.isSafDocument) {
                 val resolver = context?.contentResolver
                     ?: throw IllegalStateException("ContentResolver required for SAF rename.")
@@ -1907,14 +2507,14 @@ class FileSystemAndFormatEngine(
             }
 
             val dir = File(directoryPath)
-            val files = dir.listFiles()?.filter { it.isFile } ?: emptyList()
+            val files = requireReadableDirectoryChildren(dir).filter { it.isFile }
             val regex = if (pattern.isNotBlank()) Regex(pattern) else null
             var renamedCount = 0
 
             files.forEach { file ->
                 val replaced = if (regex != null) regex.replace(file.name, replacement) else file.name
                 val candidateName = "$prefix$replaced"
-                if (candidateName != file.name && candidateName.isNotBlank()) {
+                if (candidateName != file.name && candidateName.isNotBlank() && !candidateName.contains("/")) {
                     val dest = File(dir, candidateName)
                     if (!dest.exists() && file.renameTo(dest)) {
                         renamedCount++
@@ -1930,6 +2530,7 @@ class FileSystemAndFormatEngine(
     suspend fun runStorageAnalyzer(rootPath: String): Result<StorageAnalyzerReport> = withContext(Dispatchers.IO) {
         try {
             val root = File(rootPath)
+            requireReadableDirectoryChildren(root)
             val allFiles = mutableListOf<FileNode>()
             var dirCount = 0
             var totalBytes = 0L
