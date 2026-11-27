@@ -868,6 +868,7 @@ class FileSystemAndFormatEngine(
         val cleanName = if (trimmedArchive.endsWith(".zip", ignoreCase = true)) trimmedArchive else "$trimmedArchive.zip"
         val destIsSaf = destinationDirPathOrUri.startsWith("content://")
         val destDirFile = if (!destIsSaf) File(destinationDirPathOrUri).apply { if (!exists()) mkdirs() } else null
+        val exactRequestedZipFile = destDirFile?.let { File(it, cleanName) }
         val finalZipFile = destDirFile?.let { resolveUniqueOrTargetFile(it, cleanName) }
         val tempZip = File(
             destDirFile ?: context?.cacheDir ?: lumaWorkspaceDir,
@@ -876,6 +877,7 @@ class FileSystemAndFormatEngine(
 
         val excludedCanonicalPaths = mutableSetOf<String>().apply {
             runCatching { add(tempZip.canonicalPath) }
+            exactRequestedZipFile?.let { runCatching { add(it.canonicalPath) } }
             finalZipFile?.let { runCatching { add(it.canonicalPath) } }
         }
         val activeBranchCanonicalDirs = mutableSetOf<String>()

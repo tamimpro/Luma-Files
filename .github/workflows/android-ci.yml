@@ -71,8 +71,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG_NAME="v1.2.${{ github.run_number }}"
-          gh release create "$TAG_NAME" \
-            app/build/outputs/apk/debug/LumaFiles-FileManager-v1.2.0.apk \
-            app/build/outputs/apk/debug/LumaFiles-FileManager.apk \
-            --title "File Manager (Luma Files) $TAG_NAME" \
-            --notes "Automated v1.2.0 release of **File Manager (Luma Files)** (`com.lumafiles.filemanager`). Download **LumaFiles-FileManager-v1.2.0.apk** below to install directly on your Android device."
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" \
+              app/build/outputs/apk/debug/LumaFiles-FileManager-v1.2.0.apk \
+              app/build/outputs/apk/debug/LumaFiles-FileManager.apk \
+              --clobber
+          else
+            gh release create "$TAG_NAME" \
+              app/build/outputs/apk/debug/LumaFiles-FileManager-v1.2.0.apk \
+              app/build/outputs/apk/debug/LumaFiles-FileManager.apk \
+              --title "File Manager (Luma Files) $TAG_NAME" \
+              --notes "Automated v1.2.0 release of **File Manager (Luma Files)** (`com.lumafiles.filemanager`). Download **LumaFiles-FileManager-v1.2.0.apk** below to install directly on your Android device."
+          fi
