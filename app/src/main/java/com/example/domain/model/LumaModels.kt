@@ -11,47 +11,109 @@ enum class LumaTab {
 }
 
 enum class FileFormatCategory(val label: String, val badgeText: String) {
-    DIRECTORY("Directory", "DIR"),
-    TEXT_CODE("Text & Source Code", "CODE"),
-    STRUCTURED_DATA("JSON / XML / YAML", "DATA"),
-    MARKDOWN("Markdown Document", "MD"),
-    PDF("PDF Document", "PDF"),
-    DOCX("Word OOXML Document", "DOCX"),
-    CSV_TSV("Spreadsheet Grid", "CSV"),
-    SQLITE_DB("SQLite Database", "SQL"),
-    APK_PACKAGE("Android APK Package", "APK"),
-    ARCHIVE_ZIP("ZIP / Archive", "ZIP"),
-    VIDEO("Lossless Video", "VID"),
-    AUDIO("Lossless Audio", "AUD"),
-    IMAGE("High-Res Image", "IMG"),
-    BINARY_HEX("Raw Binary / Hex", "BIN")
+    DIRECTORY("Folder", "DIR"),
+    TEXT_CODE("Code", "CODE"),
+    STRUCTURED_DATA("Data", "DATA"),
+    MARKDOWN("Markdown", "MD"),
+    PDF("PDF", "PDF"),
+    DOCX("Document", "DOCX"),
+    CSV_TSV("Sheet", "CSV"),
+    SQLITE_DB("Database", "DB"),
+    APK_PACKAGE("App", "APK"),
+    ARCHIVE_ZIP("Archive", "ZIP"),
+    VIDEO("Video", "VID"),
+    AUDIO("Audio", "AUD"),
+    IMAGE("Image", "IMG"),
+    BINARY_HEX("Binary", "BIN")
 }
 
 enum class SortOption(val label: String) {
-    NAME_ASC("Name (A-Z)"),
-    NAME_DESC("Name (Z-A)"),
-    SIZE_DESC("Size (Largest First)"),
-    SIZE_ASC("Size (Smallest First)"),
-    DATE_DESC("Modified (Newest)"),
-    TYPE("Format Type")
+    NAME_ASC("Name A–Z"),
+    NAME_DESC("Name Z–A"),
+    SIZE_DESC("Largest"),
+    SIZE_ASC("Smallest"),
+    DATE_DESC("Newest"),
+    TYPE("Type")
 }
 
 enum class ConflictPolicy(val label: String) {
-    KEEP_BOTH("Keep Both (Auto-Rename)"),
-    OVERWRITE("Overwrite Existing"),
-    SKIP("Skip Conflicts")
+    KEEP_BOTH("Keep Both"),
+    OVERWRITE("Overwrite"),
+    SKIP("Skip")
 }
 
 enum class VaultAuthMode(val label: String, val minLength: Int) {
     PIN_4("4-Digit PIN", 4),
     PIN_6("6-Digit PIN", 6),
-    ALPHANUMERIC_PASSWORD("Alphanumeric Password", 6)
+    ALPHANUMERIC_PASSWORD("Password", 6)
 }
 
 enum class DownloadUiMode(val label: String) {
-    DEFAULT("Default (Auto Highest Quality)"),
-    ADVANCED("Advanced (Manual Stream & Engine Control)")
+    DEFAULT("Default"),
+    ADVANCED("Advanced")
 }
+
+enum class PhotoFilterCategory(val label: String) {
+    ALL("All"),
+    CINEMATIC("Cinematic"),
+    BEAUTY("Beauty")
+}
+
+data class PhotoFilterPreset(
+    val id: String,
+    val name: String,
+    val category: PhotoFilterCategory,
+    val matrix: FloatArray,
+    val glowStrength: Float = 0f,
+    val vignetteStrength: Float = 0f
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PhotoFilterPreset) return false
+        return id == other.id
+    }
+
+    override fun hashCode(): Int = id.hashCode()
+}
+
+data class PhotoAdjustments(
+    val brightness: Float = 0f,     // -0.5f .. 0.5f
+    val contrast: Float = 1f,       // 0.5f .. 1.8f
+    val saturation: Float = 1f,     // 0f .. 2f
+    val warmth: Float = 0f,         // -0.5f .. 0.5f
+    val clarity: Float = 0f,        // 0f .. 1f
+    val skinSmooth: Float = 0f,     // 0f .. 1f
+    val vignette: Float = 0f        // 0f .. 0.8f
+) {
+    val isDefault: Boolean
+        get() = brightness == 0f &&
+            contrast == 1f &&
+            saturation == 1f &&
+            warmth == 0f &&
+            clarity == 0f &&
+            skinSmooth == 0f &&
+            vignette == 0f
+}
+
+sealed interface AiEnhanceUiState {
+    data object Idle : AiEnhanceUiState
+    data class Loading(val label: String) : AiEnhanceUiState
+    data class Success(val summary: String, val remasteredBitmap: Bitmap? = null) : AiEnhanceUiState
+    data class Error(val message: String) : AiEnhanceUiState
+}
+
+data class SniffedWebMedia(
+    val url: String,
+    val fileName: String,
+    val mimeType: String,
+    val contentLength: Long = -1L,
+    val sourcePageUrl: String = "",
+    val referer: String = "",
+    val cookies: String = "",
+    val userAgent: String = "",
+    val isHlsOrDash: Boolean = false,
+    val detectedAtMillis: Long = System.currentTimeMillis()
+)
 
 data class ClipboardState(
     val sourceNodes: List<FileNode> = emptyList(),
@@ -84,7 +146,7 @@ sealed class UndoOperation(open val summaryLabel: String) {
     ) : UndoOperation(summaryLabel)
 
     data class ReverseMoveOperation(
-        val movedPairs: List<Pair<String, String>>, // Pair(currentDestinationPath, originalSourcePath)
+        val movedPairs: List<Pair<String, String>>,
         override val summaryLabel: String
     ) : UndoOperation(summaryLabel)
 
@@ -113,7 +175,11 @@ data class MediaStreamVariant(
     val hasEmbeddedAudio: Boolean,
     val requiresAudioVideoMux: Boolean,
     val isWatermarkFree: Boolean = true,
-    val estimatedSizeBytes: Long = -1L
+    val estimatedSizeBytes: Long = -1L,
+    val isHlsPlaylist: Boolean = false,
+    val refererHeader: String = "",
+    val cookieHeader: String = "",
+    val userAgentHeader: String = ""
 ) {
     val hasAudio: Boolean get() = hasEmbeddedAudio || !audioStreamUrl.isNullOrBlank()
 }
@@ -126,7 +192,9 @@ data class ResolvedMediaManifest(
     val suggestedFileName: String,
     val isSocialPlatform: Boolean,
     val variants: List<MediaStreamVariant>,
-    val recommendedVariantId: String
+    val recommendedVariantId: String,
+    val requiresBrowserSniffer: Boolean = false,
+    val browserSnifferReason: String? = null
 ) {
     val recommendedVariant: MediaStreamVariant?
         get() = variants.firstOrNull { it.variantId == recommendedVariantId } ?: variants.firstOrNull()
@@ -178,6 +246,14 @@ data class ZipEntryInfo(
     val crc32Hex: String,
     val isDirectory: Boolean,
     val lastModified: Long
+)
+
+data class ZipEntryPreview(
+    val entryName: String,
+    val textContent: String? = null,
+    val imageBitmap: Bitmap? = null,
+    val sizeBytes: Long = 0L,
+    val isBinaryUnsupported: Boolean = false
 )
 
 data class HexRow(
@@ -249,6 +325,8 @@ sealed class StudioContent {
 
     data class ApkInspectorStudio(
         val file: FileNode,
+        val appLabel: String = "",
+        val appIconBitmap: Bitmap? = null,
         val packageName: String,
         val versionName: String,
         val versionCode: Long,
@@ -283,7 +361,13 @@ sealed class StudioContent {
         val durationMs: Long,
         val sampleRateOrResolution: String,
         val bitrateOrChannels: String,
-        val formatHeaderInfo: String
+        val formatHeaderInfo: String,
+        val title: String = "",
+        val artist: String = "",
+        val album: String = "",
+        val albumArtBitmap: Bitmap? = null,
+        val widthPx: Int = 0,
+        val heightPx: Int = 0
     ) : StudioContent()
 
     data class ImageStudio(

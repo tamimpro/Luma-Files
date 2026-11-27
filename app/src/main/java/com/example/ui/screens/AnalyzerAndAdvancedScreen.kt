@@ -1,6 +1,5 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,28 +17,24 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Analytics
 import androidx.compose.material.icons.filled.Bookmark
-import androidx.compose.material.icons.filled.BugReport
-import androidx.compose.material.icons.filled.CleaningServices
-import androidx.compose.material.icons.filled.CopyAll
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,10 +48,6 @@ import com.example.data.local.OperationLogEntity
 import com.example.domain.model.FileNode
 import com.example.ui.ExplorerUiState
 import com.example.ui.LumaFormatUtils
-import com.example.ui.theme.AmberAdvanced
-import com.example.ui.theme.ElectricCyan
-import com.example.ui.theme.EmeraldVault
-import com.example.ui.theme.JetBrainsMonoFontFamily
 
 @Composable
 fun StorageAnalyzerScreen(
@@ -72,114 +63,79 @@ fun StorageAnalyzerScreen(
             .fillMaxSize()
             .testTag("storage_analyzer_screen"),
         contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.fillMaxWidth()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.Default.Analytics,
-                                contentDescription = "Storage Analyzer",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(28.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(
-                                    text = "Deep Storage & Duplicate Analyzer",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold
-                                )
-                                Text(
-                                    text = "SHA-256 Bit-Exact Duplicate Verification & Heavy File Ranker",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                        }
-
-                        OutlinedButton(onClick = onRescanStorage) {
-                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Rescan")
-                        }
+                Column {
+                    Text("Storage", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                    if (report != null) {
+                        Text(
+                            "${report.scannedFilesCount} files · ${LumaFormatUtils.formatBytes(report.totalScannedBytes)}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
-
+                }
+                IconButton(onClick = onRescanStorage, enabled = !state.isAnalyzingStorage) {
                     if (state.isAnalyzingStorage) {
-                        LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    } else if (report != null) {
-                        HorizontalDivider()
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column {
-                                Text("Files Scanned", style = MaterialTheme.typography.labelSmall)
-                                Text("${report.scannedFilesCount} files (${report.scannedDirectoriesCount} dirs)", style = MaterialTheme.typography.titleSmall)
-                            }
-                            Column {
-                                Text("Total Scanned Volume", style = MaterialTheme.typography.labelSmall)
-                                Text(LumaFormatUtils.formatBytes(report.totalScannedBytes), style = MaterialTheme.typography.titleSmall, color = ElectricCyan)
-                            }
-                            Column {
-                                Text("Reclaimable Dupes", style = MaterialTheme.typography.labelSmall)
-                                Text(LumaFormatUtils.formatBytes(report.reclaimableDuplicateBytes), style = MaterialTheme.typography.titleSmall, color = AmberAdvanced)
-                            }
-                        }
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Default.Refresh, contentDescription = "Rescan")
                     }
                 }
             }
         }
 
-        if (report != null) {
-            // Format Breakdown
+        if (report == null) {
+            item {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 48.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Button(onClick = onRescanStorage) { Text("Scan Storage") }
+                }
+            }
+        } else {
+            // Category Breakdown Card
             item {
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    modifier = Modifier.fillMaxWidth()
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
                 ) {
                     Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text(
-                            text = "FORMAT CATEGORY FOOTPRINT",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Text("By Type", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        val total = report.totalScannedBytes.coerceAtLeast(1L)
                         report.categoryBreakdownBytes.entries
                             .sortedByDescending { it.value }
+                            .take(6)
                             .forEach { (cat, bytes) ->
-                                val ratio = if (report.totalScannedBytes > 0) {
-                                    (bytes.toFloat() / report.totalScannedBytes.toFloat()).coerceIn(0.02f, 1f)
-                                } else 0.05f
+                                val frac = (bytes.toFloat() / total.toFloat()).coerceIn(0f, 1f)
                                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                                     Row(
                                         modifier = Modifier.fillMaxWidth(),
                                         horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
                                         Text(cat.label, style = MaterialTheme.typography.bodySmall)
-                                        Text(LumaFormatUtils.formatBytes(bytes), style = MaterialTheme.typography.labelMedium)
+                                        Text(LumaFormatUtils.formatBytes(bytes), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                     }
                                     LinearProgressIndicator(
-                                        progress = { ratio },
+                                        progress = { frac },
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .height(6.dp)
-                                            .clip(RoundedCornerShape(3.dp))
+                                            .height(5.dp)
+                                            .clip(RoundedCornerShape(4.dp))
                                     )
                                 }
                             }
@@ -187,92 +143,48 @@ fun StorageAnalyzerScreen(
                 }
             }
 
-            // SHA-256 Verified Duplicate Groups
-            item {
-                Text(
-                    text = "SHA-256 VERIFIED DUPLICATE FILE GROUPS (${report.duplicateGroups.size})",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            if (report.duplicateGroups.isEmpty()) {
+            // Duplicates
+            if (report.duplicateGroups.isNotEmpty()) {
                 item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(Icons.Default.CleaningServices, contentDescription = null, tint = EmeraldVault)
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text("Zero duplicate files detected! Storage is clean.")
-                        }
-                    }
+                    Text(
+                        "Duplicates (${LumaFormatUtils.formatBytes(report.reclaimableDuplicateBytes)} reclaimable)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold
+                    )
                 }
-            } else {
-                items(report.duplicateGroups, key = { it.sha256Hash }) { group ->
+                items(report.duplicateGroups) { group ->
                     Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        modifier = Modifier.fillMaxWidth()
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
                     ) {
                         Column(
-                            modifier = Modifier.padding(14.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
                         ) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween,
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.CopyAll, contentDescription = null, tint = AmberAdvanced)
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = "${group.files.size} Identical Copies (${LumaFormatUtils.formatBytes(group.fileSizeEach)} each)",
-                                        style = MaterialTheme.typography.titleSmall,
-                                        fontWeight = FontWeight.Bold
-                                    )
-                                }
-                            }
                             Text(
-                                text = "SHA-256: ${group.sha256Hash}",
-                                fontFamily = JetBrainsMonoFontFamily,
-                                style = MaterialTheme.typography.labelSmall,
+                                "${group.files.size} copies · ${LumaFormatUtils.formatBytes(group.fileSizeEach)} each",
+                                style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.primary
                             )
-                            group.files.forEachIndexed { idx, fileNode ->
+                            group.files.forEach { node ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
-                                        .padding(horizontal = 10.dp, vertical = 6.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
+                                        .clickable { onOpenFile(node) },
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Column(modifier = Modifier.weight(1f)) {
-                                        Text(
-                                            text = if (idx == 0) "${fileNode.name} (Original)" else "${fileNode.name} (Redundant Copy)",
-                                            style = MaterialTheme.typography.labelLarge
-                                        )
-                                        Text(
-                                            text = fileNode.path,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis
-                                        )
-                                    }
-                                    if (idx > 0) {
-                                        IconButton(onClick = { onDeleteDuplicateFile(fileNode) }) {
-                                            Icon(
-                                                imageVector = Icons.Default.Delete,
-                                                contentDescription = "Delete Duplicate",
-                                                tint = MaterialTheme.colorScheme.error
-                                            )
-                                        }
+                                    Text(
+                                        node.name,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    IconButton(onClick = { onDeleteDuplicateFile(node) }, modifier = Modifier.size(34.dp)) {
+                                        Icon(Icons.Default.Delete, contentDescription = "Delete Duplicate", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(18.dp))
                                     }
                                 }
                             }
@@ -281,47 +193,40 @@ fun StorageAnalyzerScreen(
                 }
             }
 
-            // Heavy & Large Files Ranking
-            item {
-                Text(
-                    text = "HEAVY & LARGE FILES RANKING (LOSSLESS READY)",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            items(report.largeFiles, key = { it.path }) { largeNode ->
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onOpenFile(largeNode) }
-                ) {
-                    Row(
+            // Largest Files
+            if (report.largeFiles.isNotEmpty()) {
+                item {
+                    Text("Largest Files", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                }
+                items(report.largeFiles.take(10), key = { it.path }) { node ->
+                    Card(
+                        shape = RoundedCornerShape(12.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                            .clickable { onOpenFile(node) }
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
                             Text(
-                                text = largeNode.name,
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.SemiBold
+                                node.name,
+                                style = MaterialTheme.typography.bodyMedium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
                             )
+                            Spacer(Modifier.width(12.dp))
                             Text(
-                                text = "${largeNode.category.label} • ${largeNode.permissionsRwx}",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                LumaFormatUtils.formatBytes(node.sizeBytes),
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.primary
                             )
                         }
-                        Text(
-                            text = LumaFormatUtils.formatBytes(largeNode.sizeBytes),
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold
-                        )
                     }
                 }
             }
@@ -344,110 +249,80 @@ fun AdvancedWorkstationHubScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .testTag("advanced_hub_screen"),
+            .testTag("tools_hub_screen"),
         contentPadding = PaddingValues(16.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp)
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        // 1. Advanced Workstation Switch Card
+        item {
+            Text("Tools", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+
+        // Settings & Mode Card
         item {
             Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (state.isAdvancedMode) {
-                        MaterialTheme.colorScheme.tertiaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surface
-                    }
-                ),
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.fillMaxWidth()
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
             ) {
-                Row(
+                Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(16.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                        Icon(
-                            imageVector = Icons.Default.Terminal,
-                            contentDescription = "Advanced Mode",
-                            tint = if (state.isAdvancedMode) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(32.dp)
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Advanced Mode", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                             Text(
-                                text = "Power-User Advanced Mode",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "Unlocks hidden dotfiles (.nomedia, .luma_hidden_config), POSIX rwx flags, Regex search, Batch Rename & Hex byte patching.",
-                                style = MaterialTheme.typography.bodySmall
+                                "Hidden files, permissions, regex & download options",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
+                        Switch(
+                            checked = state.isAdvancedMode,
+                            onCheckedChange = { onToggleAdvancedMode() },
+                            modifier = Modifier.testTag("tools_advanced_switch")
+                        )
                     }
-                    Switch(
-                        checked = state.isAdvancedMode,
-                        onCheckedChange = { onToggleAdvancedMode() },
-                        modifier = Modifier.testTag("advanced_mode_hub_switch")
-                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(onClick = onOpenBatchRegexDialog, modifier = Modifier.weight(1f)) {
+                            Icon(Icons.Default.DriveFileRenameOutline, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text("Batch Rename")
+                        }
+                        if (!state.hasAllFilesAccess) {
+                            Button(onClick = onRequestAllFilesAccess, modifier = Modifier.weight(1f)) {
+                                Icon(Icons.Default.Security, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text("Storage Access")
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // 2. Quick Power Tools
+        // Bookmarks
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                OutlinedButton(
-                    onClick = onOpenBatchRegexDialog,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Batch Regex Rename")
-                }
-                OutlinedButton(
-                    onClick = onRequestAllFilesAccess,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("All Files Access")
-                }
-            }
+            Text("Bookmarks (${bookmarks.size})", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
         }
-
-        // 3. Saved Bookmarks & SAF Mounts
-        item {
-            Text(
-                text = "BOOKMARKED DIRECTORIES & SAF MOUNTS (${bookmarks.size})",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
-
         if (bookmarks.isEmpty()) {
             item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text(
-                        text = "No bookmarked directories yet. Enable Advanced Mode in Explorer and tap 'Bookmark Path' or mount a SAF folder.",
-                        style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(14.dp)
-                    )
-                }
+                Text("No bookmarked folders yet", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         } else {
             items(bookmarks, key = { it.id }) { bm ->
                 Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { onJumpToBookmark(bm) }
@@ -455,127 +330,56 @@ fun AdvancedWorkstationHubScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Default.Bookmark, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(bm.title, style = MaterialTheme.typography.titleSmall)
-                                Text(
-                                    text = bm.pathOrUri,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
+                        Icon(Icons.Default.Bookmark, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(bm.title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+                            Text(bm.pathOrUri, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                         IconButton(onClick = { onRemoveBookmark(bm.id) }) {
-                            Icon(Icons.Default.Delete, contentDescription = "Remove Bookmark")
+                            Icon(Icons.Default.Delete, contentDescription = "Remove Bookmark", modifier = Modifier.size(18.dp))
                         }
                     }
                 }
             }
         }
 
-        // 4. Exact Error Diagnostics & Operation Audit Trail
+        // Recent Activity Logs
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "EXACT DIAGNOSTIC & OPERATION AUDIT TRAIL (${logs.size})",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+                Text("Activity (${logs.size})", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 if (logs.isNotEmpty()) {
-                    OutlinedButton(onClick = onClearLogs) {
-                        Text("Clear Logs")
-                    }
+                    TextButton(onClick = onClearLogs) { Text("Clear") }
                 }
             }
         }
-
-        if (logs.isEmpty()) {
-            item {
-                Card(
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+        items(logs.take(25), key = { it.id }) { log ->
+            Card(
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (log.isError) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f)
+                    else MaterialTheme.colorScheme.surfaceContainerLow
+                )
+            ) {
+                Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                     Text(
-                        text = "All operations healthy — zero unhandled exceptions recorded.",
+                        log.summary,
                         style = MaterialTheme.typography.bodySmall,
-                        modifier = Modifier.padding(14.dp)
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
                     )
-                }
-            }
-        } else {
-            items(logs, key = { it.id }) { log ->
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (log.isError) {
-                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f)
-                        } else {
-                            MaterialTheme.colorScheme.surface
-                        }
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column(
-                        modifier = Modifier.padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(4.dp)
-                    ) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                if (log.isError) {
-                                    Icon(
-                                        imageVector = Icons.Default.BugReport,
-                                        contentDescription = null,
-                                        tint = MaterialTheme.colorScheme.error,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                }
-                                Text(
-                                    text = log.operationType,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = if (log.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            Text(
-                                text = LumaFormatUtils.formatTimestamp(log.timestamp),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        Text(
-                            text = log.summary,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = FontWeight.Medium
-                        )
-                        if (log.exactTechnicalReason.isNotBlank()) {
-                            Surface(
-                                color = MaterialTheme.colorScheme.surfaceVariant,
-                                shape = RoundedCornerShape(6.dp),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(
-                                    text = log.exactTechnicalReason,
-                                    fontFamily = JetBrainsMonoFontFamily,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    modifier = Modifier.padding(8.dp)
-                                )
-                            }
-                        }
-                    }
+                    Text(
+                        LumaFormatUtils.formatTimestamp(log.timestamp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

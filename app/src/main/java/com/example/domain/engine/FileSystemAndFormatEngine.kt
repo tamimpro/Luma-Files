@@ -5,6 +5,9 @@ import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.graphics.pdf.PdfRenderer
 import android.media.MediaMetadataRetriever
 import android.net.Uri
@@ -27,6 +30,7 @@ import com.example.domain.model.StorageAnalyzerReport
 import com.example.domain.model.StorageVolumeRoot
 import com.example.domain.model.StudioContent
 import com.example.domain.model.ZipEntryInfo
+import com.example.domain.model.ZipEntryPreview
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.w3c.dom.Document
@@ -1666,6 +1670,8 @@ class FileSystemAndFormatEngine(
     // ==================== APK PACKAGE ARCHIVE INSPECTOR ====================
 
     private fun loadApkInspectorStudio(node: FileNode, file: File): StudioContent.ApkInspectorStudio {
+        var appLabel = node.name.substringBeforeLast('.')
+        var appIconBitmap: Bitmap? = null
         var pkgName = "Unknown Package"
         var verName = "1.0"
         var verCode = 1L
@@ -1689,10 +1695,20 @@ class FileSystemAndFormatEngine(
                     info.versionCode.toLong()
                 }
                 info.applicationInfo?.let { appInfo ->
+                    appInfo.sourceDir = file.absolutePath
+                    appInfo.publicSourceDir = file.absolutePath
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
                         minSdk = appInfo.minSdkVersion
                     }
                     targetSdk = appInfo.targetSdkVersion
+                    runCatching {
+                        val label = pm.getApplicationLabel(appInfo)?.toString()?.trim()
+                        if (!label.isNullOrBlank()) appLabel = label
+                    }
+                    runCatching {
+                        val drawable = pm.getApplicationIcon(appInfo)
+                        appIconBitmap = drawableToBitmap(drawable, 160)
+                    }
                 }
                 info.requestedPermissions?.let { permissions.addAll(it) }
                 info.activities?.mapNotNull { it.name }?.let { activities.addAll(it) }
@@ -1719,6 +1735,8 @@ class FileSystemAndFormatEngine(
         val sha256 = cryptoEngine.computeHash(file, "SHA-256")
         return StudioContent.ApkInspectorStudio(
             file = node,
+            appLabel = appLabel,
+            appIconBitmap = appIconBitmap,
             packageName = pkgName,
             versionName = verName,
             versionCode = verCode,
@@ -1731,6 +1749,19 @@ class FileSystemAndFormatEngine(
             totalEntriesCount = totalEntries,
             sha256Signature = sha256
         )
+    }
+
+    private fun drawableToBitmap(drawable: Drawable, maxSizePx: Int = 160): Bitmap {
+        if (drawable is BitmapDrawable && drawable.bitmap != null) {
+            return drawable.bitmap
+        }
+        val width = drawable.intrinsicWidth.takeIf { it > 0 }?.coerceAtMost(maxSizePx) ?: maxSizePx
+        val height = drawable.intrinsicHeight.takeIf { it > 0 }?.coerceAtMost(maxSizePx) ?: maxSizePx
+        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        drawable.setBounds(0, 0, canvas.width, canvas.height)
+        drawable.draw(canvas)
+        return bmp
     }
 
     // ==================== PDF, ZIP, MEDIA, IMAGE & HEX STUDIOS ====================
@@ -1766,6 +1797,34 @@ class FileSystemAndFormatEngine(
             renderer.close()
             pfd.close()
         }
+    }
+
+    suspend fun renderPdfPageBitmap(
+        node: FileNode,
+        pageIndex: Int,
+        targetWidthPx: Int = 1280
+    ): Bitmap? = withContext(Dispatchers.IO) {
+        runCatching {
+            val file = resolveLocalFileForStudio(node)
+            val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+            val renderer = PdfRenderer(pfd)
+            try {
+                if (renderer.pageCount <= 0) return@runCatching null
+                val safeIndex = pageIndex.coerceIn(0, renderer.pageCount - 1)
+                val page = renderer.openPage(safeIndex)
+                val scale = (targetWidthPx.toFloat() / page.width.coerceAtLeast(1)).coerceIn(1.2f, 2.5f)
+                val outW = (page.width * scale).toInt().coerceIn(200, 2200)
+                val outH = (page.height * scale).toInt().coerceIn(200, 3200)
+                val bmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+                bmp.eraseColor(android.graphics.Color.WHITE)
+                page.render(bmp, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                page.close()
+                bmp
+            } finally {
+                renderer.close()
+                pfd.close()
+            }
+        }.getOrNull()
     }
 
     suspend fun savePdfAnnotationNotes(node: FileNode, notesText: String): Result<File> = withContext(Dispatchers.IO) {
@@ -1973,41 +2032,213 @@ class FileSystemAndFormatEngine(
         }
     }
 
+    suspend fun readZipEntryPreview(
+        node: FileNode,
+        entryName: String
+    ): Result<ZipEntryPreview> = withContext(Dispatchers.IO) {
+        try {
+            val zipFile = resolveLocalFileForStudio(node)
+            ZipFile(zipFile).use { zip ->
+                val entry = zip.getEntry(entryName)
+                    ?: throw IOException("Entry '$entryName' not found inside archive.")
+                if (entry.isDirectory) {
+                    return@withContext Result.success(
+                        ZipEntryPreview(entryName = entryName, textContent = "Folder entry", sizeBytes = 0L)
+                    )
+                }
+                val ext = entryName.substringAfterLast('.', "").lowercase()
+                val imageExts = setOf("png", "jpg", "jpeg", "webp", "bmp", "gif")
+                val textExts = setOf(
+                    "txt", "md", "json", "xml", "yaml", "yml", "kt", "java", "py", "js", "ts",
+                    "html", "css", "csv", "tsv", "gradle", "kts", "properties", "sh", "sql",
+                    "log", "ini", "cfg", "toml", "c", "cpp", "h", "rs", "go", "svg"
+                )
+                val maxPreviewBytes = 256 * 1024
+                val maxImageBytes = 8 * 1024 * 1024
+
+                if (ext in imageExts) {
+                    zip.getInputStream(entry).use { input ->
+                        val baos = ByteArrayOutputStream()
+                        val buf = ByteArray(16 * 1024)
+                        var total = 0
+                        var len: Int
+                        while (input.read(buf).also { len = it } > 0 && total < maxImageBytes) {
+                            val toWrite = minOf(len, maxImageBytes - total)
+                            baos.write(buf, 0, toWrite)
+                            total += toWrite
+                        }
+                        val bytes = baos.toByteArray()
+                        val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        return@withContext Result.success(
+                            ZipEntryPreview(
+                                entryName = entryName,
+                                imageBitmap = bmp,
+                                sizeBytes = entry.size.coerceAtLeast(bytes.size.toLong()),
+                                isBinaryUnsupported = bmp == null
+                            )
+                        )
+                    }
+                } else {
+                    zip.getInputStream(entry).use { input ->
+                        val baos = ByteArrayOutputStream()
+                        val buf = ByteArray(16 * 1024)
+                        var total = 0
+                        var len: Int
+                        while (input.read(buf).also { len = it } > 0 && total < maxPreviewBytes) {
+                            val toWrite = minOf(len, maxPreviewBytes - total)
+                            baos.write(buf, 0, toWrite)
+                            total += toWrite
+                        }
+                        val bytes = baos.toByteArray()
+                        val looksBinary = ext !in textExts && bytes.take(512).count { b ->
+                            val v = b.toInt() and 0xFF
+                            v == 0 || (v < 9) || (v in 14..31)
+                        } > 12
+                        if (looksBinary) {
+                            return@withContext Result.success(
+                                ZipEntryPreview(
+                                    entryName = entryName,
+                                    sizeBytes = entry.size.coerceAtLeast(bytes.size.toLong()),
+                                    isBinaryUnsupported = true
+                                )
+                            )
+                        }
+                        val text = String(bytes, Charsets.UTF_8)
+                        val suffix = if (entry.size > maxPreviewBytes) "\n\n... (Preview truncated at 256 KB)" else ""
+                        return@withContext Result.success(
+                            ZipEntryPreview(
+                                entryName = entryName,
+                                textContent = text + suffix,
+                                sizeBytes = entry.size.coerceAtLeast(bytes.size.toLong())
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    suspend fun extractSingleZipEntry(
+        node: FileNode,
+        entryName: String,
+        targetDir: File
+    ): Result<File> = withContext(Dispatchers.IO) {
+        try {
+            val normalizedSegments = entryName.replace('\\', '/').split('/')
+            if (entryName.isBlank() ||
+                entryName.startsWith("/") ||
+                entryName.startsWith("\\") ||
+                entryName.contains(":\\") ||
+                normalizedSegments.any { it == ".." }
+            ) {
+                throw SecurityException("Blocked Zip-Slip path traversal entry: '$entryName'")
+            }
+            val zipFile = resolveLocalFileForStudio(node)
+            val destRoot = File(targetDir, zipFile.nameWithoutExtension + "_extracted").apply { mkdirs() }
+            val destRootCanonical = destRoot.canonicalFile
+            val destPrefix = destRootCanonical.path + File.separator
+            val outFile = File(destRootCanonical, entryName)
+            val outCanonical = outFile.canonicalFile
+            if (outCanonical != destRootCanonical && !outCanonical.path.startsWith(destPrefix)) {
+                throw SecurityException("Blocked Zip-Slip boundary violation for '$entryName'.")
+            }
+
+            ZipFile(zipFile).use { zip ->
+                val entry = zip.getEntry(entryName)
+                    ?: throw IOException("Entry '$entryName' not found in archive.")
+                if (entry.isDirectory) {
+                    outCanonical.mkdirs()
+                } else {
+                    outCanonical.parentFile?.mkdirs()
+                    val tempFile = File(outCanonical.parentFile ?: destRootCanonical, ".luma_single_${UUID.randomUUID()}.tmp")
+                    try {
+                        zip.getInputStream(entry).use { input ->
+                            BufferedOutputStream(FileOutputStream(tempFile), 64 * 1024).use { bos ->
+                                input.copyTo(bos, 64 * 1024)
+                                bos.flush()
+                            }
+                        }
+                        atomicReplaceFile(tempFile, outCanonical)
+                    } catch (e: Exception) {
+                        if (tempFile.exists()) tempFile.delete()
+                        throw e
+                    }
+                }
+            }
+            Result.success(outCanonical)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     private fun loadMediaStudio(node: FileNode, file: File): StudioContent.MediaStudio {
         val isVideo = node.category == FileFormatCategory.VIDEO
         var durationMs = 0L
-        var sampleRateOrRes = if (isVideo) "1920x1080 (Lossless Stream)" else "44,100 Hz PCM"
-        var bitrateOrChannels = if (isVideo) "H.264 / AAC" else "16-Bit Lossless"
-        var headerSummary = "Direct Hardware Media Pipeline"
+        var sampleRateOrRes = if (isVideo) "HD Video" else "Audio"
+        var bitrateOrChannels = ""
+        var headerSummary = node.extension.uppercase().ifBlank { if (isVideo) "VIDEO" else "AUDIO" }
+        var title = node.name.substringBeforeLast('.')
+        var artist = ""
+        var album = ""
+        var albumArtBitmap: Bitmap? = null
+        var widthPx = 0
+        var heightPx = 0
 
         if (node.extension == "wav" && file.length() >= 44) {
-            RandomAccessFile(file, "r").use { raf ->
-                val header = ByteArray(44)
-                raf.readFully(header)
-                val bb = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
-                val channels = bb.getShort(22).toInt()
-                val sampleRate = bb.getInt(24)
-                val byteRate = bb.getInt(28)
-                val bitsPerSample = bb.getShort(34).toInt()
-                val dataBytes = bb.getInt(40).coerceAtLeast(1)
-                durationMs = (dataBytes.toLong() * 1000L) / byteRate.coerceAtLeast(1)
-                sampleRateOrRes = "$sampleRate Hz • $bitsPerSample-bit PCM"
-                bitrateOrChannels = "${if (channels == 1) "Mono (1ch)" else "Stereo (${channels}ch)"} • ${(byteRate * 8) / 1000} kbps"
-                headerSummary = "RIFF/WAVE Lossless Uncompressed PCM Header Verified"
+            runCatching {
+                RandomAccessFile(file, "r").use { raf ->
+                    val header = ByteArray(44)
+                    raf.readFully(header)
+                    val bb = ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN)
+                    val channels = bb.getShort(22).toInt()
+                    val sampleRate = bb.getInt(24)
+                    val byteRate = bb.getInt(28)
+                    val bitsPerSample = bb.getShort(34).toInt()
+                    val dataBytes = bb.getInt(40).coerceAtLeast(1)
+                    durationMs = (dataBytes.toLong() * 1000L) / byteRate.coerceAtLeast(1)
+                    sampleRateOrRes = "$sampleRate Hz • $bitsPerSample-bit"
+                    bitrateOrChannels = "${if (channels == 1) "Mono" else "Stereo"} • ${(byteRate * 8) / 1000} kbps"
+                    headerSummary = "WAV PCM"
+                }
             }
         } else {
             runCatching {
                 val retriever = MediaMetadataRetriever()
-                retriever.setDataSource(file.absolutePath)
-                durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-                val br = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull()
-                if (br != null) bitrateOrChannels = "${br / 1000} kbps"
-                if (isVideo) {
-                    val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)
-                    val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)
-                    if (w != null && h != null) sampleRateOrRes = "${w}x${h} Progressive"
+                try {
+                    retriever.setDataSource(file.absolutePath)
+                    durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
+                    val br = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_BITRATE)?.toLongOrNull()
+                    if (br != null && br > 0) bitrateOrChannels = "${br / 1000} kbps"
+
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+                        ?.takeIf { it.isNotBlank() }?.let { title = it }
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                        ?.takeIf { it.isNotBlank() }?.let { artist = it }
+                    retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
+                        ?.takeIf { it.isNotBlank() }?.let { album = it }
+
+                    if (isVideo) {
+                        val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH)?.toIntOrNull() ?: 0
+                        val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT)?.toIntOrNull() ?: 0
+                        widthPx = w
+                        heightPx = h
+                        if (w > 0 && h > 0) sampleRateOrRes = "${w}×${h}"
+                    } else {
+                        val sr = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                            retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_SAMPLERATE)
+                        } else null
+                        if (!sr.isNullOrBlank()) sampleRateOrRes = "$sr Hz"
+                        val embeddedPic = retriever.embeddedPicture
+                        if (embeddedPic != null && embeddedPic.isNotEmpty()) {
+                            val opts = BitmapFactory.Options().apply { inSampleSize = 1 }
+                            albumArtBitmap = BitmapFactory.decodeByteArray(embeddedPic, 0, embeddedPic.size, opts)
+                        }
+                    }
+                } finally {
+                    retriever.release()
                 }
-                retriever.release()
             }
         }
 
@@ -2017,7 +2248,13 @@ class FileSystemAndFormatEngine(
             durationMs = durationMs,
             sampleRateOrResolution = sampleRateOrRes,
             bitrateOrChannels = bitrateOrChannels,
-            formatHeaderInfo = headerSummary
+            formatHeaderInfo = headerSummary,
+            title = title,
+            artist = artist,
+            album = album,
+            albumArtBitmap = albumArtBitmap,
+            widthPx = widthPx,
+            heightPx = heightPx
         )
     }
 
@@ -2037,11 +2274,10 @@ class FileSystemAndFormatEngine(
         }
         val bitmap = BitmapFactory.decodeFile(file.absolutePath, decodeOpts)
         val exifMap = linkedMapOf(
-            "Dimensions" to "${origW} x ${origH} px (${String.format("%.2f", (origW * origH) / 1_000_000f)} MP)",
-            "Color Depth" to "32-bit ARGB_8888 (Zero Re-compression)",
-            "MIME Format" to node.mimeType,
-            "Exact Byte Size" to "${file.length()} bytes",
-            "POSIX Mode" to node.permissionsRwx
+            "Resolution" to "${origW} × ${origH} px (${String.format("%.1f", (origW * origH) / 1_000_000f)} MP)",
+            "Format" to node.extension.uppercase().ifBlank { node.mimeType },
+            "Size" to "${file.length()} bytes",
+            "Path" to node.path
         )
 
         return StudioContent.ImageStudio(
@@ -2049,7 +2285,7 @@ class FileSystemAndFormatEngine(
             bitmap = bitmap,
             widthPx = origW,
             heightPx = origH,
-            colorSpaceInfo = "sRGB Lossless Pipeline",
+            colorSpaceInfo = "sRGB",
             exifSummary = exifMap
         )
     }

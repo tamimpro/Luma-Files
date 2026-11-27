@@ -47,6 +47,13 @@ class CryptoVaultEngine(
         if (!nomedia.exists()) runCatching { nomedia.createNewFile() }
     }
 
+    // Isolated volatile directory for seamless in-vault viewing without exposing files to public storage
+    val volatilePreviewDir: File = File(vaultDir, ".volatile_preview").apply {
+        if (!exists()) mkdirs()
+        val nomedia = File(this, ".nomedia")
+        if (!nomedia.exists()) runCatching { nomedia.createNewFile() }
+    }
+
     private val secureRandom = SecureRandom()
 
     // In-memory fallback store for headless JVM unit testing when Context is null
@@ -646,6 +653,110 @@ class CryptoVaultEngine(
                 )
             } else {
                 Result.failure(e)
+            }
+        }
+    }
+
+    /**
+     * Decrypts a locked vault item into the isolated, app-private volatile preview directory
+     * so users can view photos, videos, audio, PDFs, docs, and code seamlessly while unlocked.
+     * Never writes to public storage and never removes the encrypted .lvault container.
+     */
+    suspend fun decryptVaultItemToVolatilePreview(
+        item: VaultItemEntity,
+        activeSecret: String
+    ): Result<File> = withContext(Dispatchers.IO) {
+        if (!volatilePreviewDir.exists()) volatilePreviewDir.mkdirs()
+        val isolatedSubDir = File(volatilePreviewDir, "view_${item.id}_${System.nanoTime()}").apply {
+            mkdirs()
+        }
+        val res = decryptVaultItemToDirectory(
+            item = item,
+            activeSecret = activeSecret,
+            targetDirectory = isolatedSubDir,
+            removeEncryptedCopy = false
+        )
+        if (res.isFailure) {
+            shredAndDeleteFile(isolatedSubDir)
+        }
+        res
+    }
+
+    /**
+     * Re-encrypts an edited volatile preview file back into its existing VaultItemEntity
+     * (for example after AI enhancing a locked photo or editing a locked document inside the vault).
+     */
+    suspend fun reEncryptEditedPreviewToVault(
+        existingItem: VaultItemEntity,
+        modifiedPlainFile: File,
+        activeSecret: String
+    ): Result<VaultItemEntity> = withContext(Dispatchers.IO) {
+        try {
+            val fileSalt = ByteArray(SALT_BYTES).also { secureRandom.nextBytes(it) }
+            val iv = ByteArray(IV_BYTES).also { secureRandom.nextBytes(it) }
+            val masterDek = unwrapMasterDekWithSecret(activeSecret)
+            val fileKeyBytes = try {
+                deriveFileSubKeyFromMasterDek(masterDek, fileSalt)
+            } finally {
+                masterDek.fill(0)
+            }
+
+            val cipher = Cipher.getInstance(AES_GCM_TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(fileKeyBytes, "AES"), GCMParameterSpec(GCM_TAG_BITS, iv))
+
+            val encTarget = File(existingItem.encryptedFilePath)
+            val tempEnc = File(vaultDir, ".luma_reenc_${UUID.randomUUID()}.tmp")
+            val sha256Digest = MessageDigest.getInstance("SHA-256")
+            var totalBytes = 0L
+
+            try {
+                BufferedInputStream(FileInputStream(modifiedPlainFile), BUFFER_SIZE).use { input ->
+                    BufferedOutputStream(FileOutputStream(tempEnc), BUFFER_SIZE).use { output ->
+                        val buffer = ByteArray(BUFFER_SIZE)
+                        var read: Int
+                        while (input.read(buffer).also { read = it } != -1) {
+                            sha256Digest.update(buffer, 0, read)
+                            val chunk = cipher.update(buffer, 0, read)
+                            if (chunk != null && chunk.isNotEmpty()) output.write(chunk)
+                            totalBytes += read
+                        }
+                        val tail = cipher.doFinal()
+                        if (tail != null && tail.isNotEmpty()) output.write(tail)
+                        output.flush()
+                    }
+                }
+                if (encTarget.exists()) shredAndDeleteFile(encTarget)
+                if (!tempEnc.renameTo(encTarget)) {
+                    tempEnc.copyTo(encTarget, overwrite = true)
+                    shredAndDeleteFile(tempEnc)
+                }
+            } finally {
+                fileKeyBytes.fill(0)
+                if (tempEnc.exists()) shredAndDeleteFile(tempEnc)
+            }
+
+            Result.success(
+                existingItem.copy(
+                    originalSizeBytes = totalBytes,
+                    ivHex = iv.toHex(),
+                    saltHex = fileSalt.toHex(),
+                    sha256Checksum = sha256Digest.digest().toHex()
+                )
+            )
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Zero-overwrites and deletes every temporary decrypted preview file immediately.
+     */
+    fun shredAllVolatilePreviews() {
+        runCatching {
+            volatilePreviewDir.listFiles()?.forEach { child ->
+                if (child.name != ".nomedia") {
+                    shredAndDeleteFile(child)
+                }
             }
         }
     }

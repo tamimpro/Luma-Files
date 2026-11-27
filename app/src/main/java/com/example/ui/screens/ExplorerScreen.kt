@@ -1,10 +1,9 @@
 package com.example.ui.screens
 
-import androidx.compose.foundation.Image
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,57 +19,53 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Android
-import androidx.compose.material.icons.filled.Archive
-import androidx.compose.material.icons.filled.Audiotrack
+import androidx.compose.material.icons.filled.AudioFile
 import androidx.compose.material.icons.filled.BookmarkAdd
-import androidx.compose.material.icons.filled.CheckBox
-import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
-import androidx.compose.material.icons.filled.ChevronRight
-import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
-import androidx.compose.material.icons.filled.FilterList
-import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Folder
-import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.FolderZip
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Movie
+import androidx.compose.material.icons.filled.OpenInNew
 import androidx.compose.material.icons.filled.PictureAsPdf
+import androidx.compose.material.icons.filled.RestoreFromTrash
+import androidx.compose.material.icons.filled.SdStorage
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.SelectAll
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.TableChart
+import androidx.compose.material.icons.filled.VideoFile
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -83,16 +78,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.example.R
 import com.example.domain.model.ConflictPolicy
 import com.example.domain.model.FileFormatCategory
 import com.example.domain.model.FileNode
@@ -100,13 +91,8 @@ import com.example.domain.model.SortOption
 import com.example.domain.model.StorageVolumeRoot
 import com.example.ui.ExplorerUiState
 import com.example.ui.LumaFormatUtils
-import com.example.ui.theme.AmberAdvanced
-import com.example.ui.theme.BlueDoc
-import com.example.ui.theme.ElectricCyan
-import com.example.ui.theme.EmeraldVault
-import com.example.ui.theme.PurpleArchive
-import com.example.ui.theme.RoseMedia
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun ExplorerScreen(
     state: ExplorerUiState,
@@ -122,6 +108,8 @@ fun ExplorerScreen(
     onSearchChanged: (String, Boolean) -> Unit,
     onSortChanged: (SortOption) -> Unit,
     onFileTapped: (FileNode) -> Unit,
+    onOpenExternal: (FileNode) -> Unit,
+    onShareFile: (FileNode) -> Unit,
     onToggleSelectFile: (FileNode) -> Unit,
     onSelectAllInDir: () -> Unit,
     onClearSelection: () -> Unit,
@@ -141,1166 +129,641 @@ fun ExplorerScreen(
     onShowBatchRenameDialog: () -> Unit,
     onBookmarkCurrentDir: () -> Unit
 ) {
-    var sortMenuExpanded by remember { mutableStateOf(false) }
-    var renameTargetNode by remember { mutableStateOf<FileNode?>(null) }
-    var renameInputText by remember { mutableStateOf("") }
+    var showSortMenu by remember { mutableStateOf(false) }
+    var renameTarget by remember { mutableStateOf<FileNode?>(null) }
+    var renameInput by remember { mutableStateOf("") }
+    var showSearchBar by remember { mutableStateOf(false) }
 
-    val hasBottomOverlay = state.selectedFilePaths.isNotEmpty() ||
-        state.clipboardState.isActive ||
-        state.lastUndoOperation != null
+    val primaryVolume = state.storageRoots.firstOrNull { !it.isSafTree && it.totalBytes > 0L }
+    val isSelectionMode = state.selectedFilePaths.isNotEmpty()
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .testTag("explorer_lazy_column"),
-            contentPadding = PaddingValues(
-                start = 16.dp,
-                end = 16.dp,
-                top = 12.dp,
-                bottom = if (hasBottomOverlay) 190.dp else 24.dp
-            ),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // 1. Streamlined Luma Files Storage Bar
-            item {
-                LumaStorageHeroCard(
-                    state = state,
-                    onRequestAllFilesAccess = onRequestAllFilesAccess,
-                    onRequestSafFolderMount = onRequestSafFolderMount
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("explorer_screen_root")
+    ) {
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Compact Storage Bar + Volume Pills (only when at root/top level and not searching)
+            if (!isSelectionMode) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (primaryVolume != null) {
+                            val usedBytes = (primaryVolume.totalBytes - primaryVolume.freeBytes).coerceAtLeast(0L)
+                            val usedFrac = (usedBytes.toFloat() / primaryVolume.totalBytes.coerceAtLeast(1L).toFloat()).coerceIn(0f, 1f)
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = "Storage",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "${LumaFormatUtils.formatBytes(primaryVolume.freeBytes)} free of ${LumaFormatUtils.formatBytes(primaryVolume.totalBytes)}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            LinearProgressIndicator(
+                                progress = { usedFrac },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(5.dp)
+                                    .clip(RoundedCornerShape(4.dp))
+                            )
+                        }
+
+                        // Volume & Trash Quick Pills
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            items(state.storageRoots, key = { it.path }) { root ->
+                                val isSelected = state.currentPath == root.path
+                                val shortLabel = when {
+                                    root.title.contains("Internal", ignoreCase = true) -> "Internal"
+                                    root.title.contains("SD", ignoreCase = true) -> "SD Card"
+                                    root.isSafTree -> root.title.removePrefix("SAF (").removeSuffix(")")
+                                    else -> root.title.take(12)
+                                }
+                                FilterChip(
+                                    selected = isSelected,
+                                    onClick = { onSelectStorageRoot(root) },
+                                    label = { Text(shortLabel, style = MaterialTheme.typography.labelSmall) },
+                                    leadingIcon = {
+                                        Icon(
+                                            imageVector = if (root.isRemovableSd) Icons.Default.SdStorage else Icons.Default.Storage,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(15.dp)
+                                        )
+                                    }
+                                )
+                            }
+                            if (!state.hasAllFilesAccess) {
+                                item {
+                                    FilterChip(
+                                        selected = false,
+                                        onClick = onRequestAllFilesAccess,
+                                        label = { Text("Allow All Files", style = MaterialTheme.typography.labelSmall) }
+                                    )
+                                }
+                            }
+                            item {
+                                FilterChip(
+                                    selected = false,
+                                    onClick = onRequestSafFolderMount,
+                                    label = { Text("+ Folder", style = MaterialTheme.typography.labelSmall) }
+                                )
+                            }
+                            item {
+                                FilterChip(
+                                    selected = false,
+                                    onClick = onOpenRecycleBin,
+                                    label = {
+                                        val cnt = state.recycleBinItems.size
+                                        Text(if (cnt > 0) "Trash ($cnt)" else "Trash", style = MaterialTheme.typography.labelSmall)
+                                    },
+                                    leadingIcon = {
+                                        Icon(Icons.Default.RestoreFromTrash, null, modifier = Modifier.size(15.dp))
+                                    },
+                                    modifier = Modifier.testTag("explorer_trash_chip")
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Quick Category Filter Strip + Action Icons (Search, Sort, Bookmark)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                LazyRow(
+                    modifier = Modifier.weight(1f),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp)
+                ) {
+                    val chips: List<Pair<FileFormatCategory?, String>> = listOf(
+                        null to "All",
+                        FileFormatCategory.IMAGE to "Images",
+                        FileFormatCategory.VIDEO to "Media",
+                        FileFormatCategory.PDF to "Docs",
+                        FileFormatCategory.ARCHIVE_ZIP to "Archives",
+                        FileFormatCategory.APK_PACKAGE to "APKs"
+                    )
+                    items(chips) { (cat, label) ->
+                        FilterChip(
+                            selected = state.selectedCategoryFilter == cat,
+                            onClick = { onSelectCategoryCard(cat) },
+                            label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = {
+                        showSearchBar = !showSearchBar
+                        if (!showSearchBar && state.searchQuery.isNotEmpty()) {
+                            onSearchChanged("", false)
+                        }
+                    },
+                    modifier = Modifier.testTag("explorer_search_toggle")
+                ) {
+                    Icon(if (showSearchBar) Icons.Default.Close else Icons.Default.Search, contentDescription = "Search")
+                }
+
+                Box {
+                    IconButton(onClick = { showSortMenu = true }, modifier = Modifier.testTag("explorer_sort_btn")) {
+                        Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "Sort")
+                    }
+                    DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
+                        SortOption.entries.forEach { opt ->
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        opt.label,
+                                        fontWeight = if (state.sortOption == opt) FontWeight.Bold else FontWeight.Normal
+                                    )
+                                },
+                                onClick = {
+                                    showSortMenu = false
+                                    onSortChanged(opt)
+                                }
+                            )
+                        }
+                        HorizontalDivider()
+                        DropdownMenuItem(
+                            text = { Text("Bookmark folder") },
+                            leadingIcon = { Icon(Icons.Default.BookmarkAdd, null) },
+                            onClick = {
+                                showSortMenu = false
+                                onBookmarkCurrentDir()
+                            }
+                        )
+                        if (state.isAdvancedMode) {
+                            DropdownMenuItem(
+                                text = { Text("Batch rename") },
+                                leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                                onClick = {
+                                    showSortMenu = false
+                                    onShowBatchRenameDialog()
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Expandable Search Field
+            AnimatedVisibility(visible = showSearchBar || state.searchQuery.isNotBlank()) {
+                OutlinedTextField(
+                    value = state.searchQuery,
+                    onValueChange = { onSearchChanged(it, state.useRegexSearch) },
+                    placeholder = { Text(if (state.isAdvancedMode) "Search or regex…" else "Search files…") },
+                    singleLine = true,
+                    leadingIcon = { Icon(Icons.Default.Search, null) },
+                    trailingIcon = {
+                        if (state.searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { onSearchChanged("", state.useRegexSearch) }) {
+                                Icon(Icons.Default.Close, contentDescription = "Clear Search")
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                        .testTag("explorer_search_input")
                 )
             }
 
-            // 2. Storage Volume Roots Switcher (Internal Shared Storage First)
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "STORAGE VOLUMES (INTERNAL, SD CARD & SAF)",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            TextButton(
-                                onClick = onOpenRecycleBin,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
-                                modifier = Modifier.testTag("open_recycle_bin_btn")
-                            ) {
-                                Icon(
-                                    Icons.Default.DeleteSweep,
-                                    contentDescription = "Recycle Bin",
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text(
-                                    text = "Recycle Bin (${state.recycleBinItems.size})",
-                                    style = MaterialTheme.typography.labelSmall
-                                )
-                            }
-                            TextButton(
-                                onClick = onRequestSafFolderMount,
-                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
-                            ) {
-                                Icon(Icons.Default.CreateNewFolder, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Mount SAF", style = MaterialTheme.typography.labelSmall)
-                            }
-                        }
-                    }
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(state.storageRoots) { root ->
-                            val isSelected = state.currentPath == root.path
-                            Surface(
-                                shape = RoundedCornerShape(14.dp),
-                                color = if (isSelected) {
-                                    MaterialTheme.colorScheme.primaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.surface
-                                },
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(14.dp))
-                                    .border(
-                                        width = 1.dp,
-                                        color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                                        shape = RoundedCornerShape(14.dp)
-                                    )
-                                    .clickable { onSelectStorageRoot(root) }
-                            ) {
-                                Row(
-                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Storage,
-                                        contentDescription = null,
-                                        tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Column {
-                                        Text(
-                                            text = root.title,
-                                            style = MaterialTheme.typography.labelLarge,
-                                            fontWeight = FontWeight.Bold
-                                        )
-                                        Text(
-                                            text = "${LumaFormatUtils.formatBytes(root.freeBytes)} Free",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 3. Quick Format Studios & Secure Vault
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "BUILT-IN LOSSLESS STUDIOS & VAULT",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        if (state.selectedCategoryFilter != null) {
-                            TextButton(onClick = { onSelectCategoryCard(null) }) {
-                                Text("Clear Filter")
-                            }
-                        }
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        CategoryQuickCard(
-                            title = "DOCX / CSV",
-                            subtitle = "View & Edit",
-                            icon = Icons.Default.Description,
-                            accentColor = BlueDoc,
-                            isSelected = state.selectedCategoryFilter == FileFormatCategory.PDF,
-                            onClick = {
-                                onSelectCategoryCard(
-                                    if (state.selectedCategoryFilter == FileFormatCategory.PDF) null else FileFormatCategory.PDF
-                                )
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        CategoryQuickCard(
-                            title = "Code / JSON",
-                            subtitle = "Format & Edit",
-                            icon = Icons.Default.Code,
-                            accentColor = ElectricCyan,
-                            isSelected = state.selectedCategoryFilter == FileFormatCategory.TEXT_CODE,
-                            onClick = {
-                                onSelectCategoryCard(
-                                    if (state.selectedCategoryFilter == FileFormatCategory.TEXT_CODE) null else FileFormatCategory.TEXT_CODE
-                                )
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        CategoryQuickCard(
-                            title = "SQLite DB",
-                            subtitle = "SQL & Rows",
-                            icon = Icons.Default.TableChart,
-                            accentColor = AmberAdvanced,
-                            isSelected = state.selectedCategoryFilter == FileFormatCategory.SQLITE_DB,
-                            onClick = {
-                                onSelectCategoryCard(
-                                    if (state.selectedCategoryFilter == FileFormatCategory.SQLITE_DB) null else FileFormatCategory.SQLITE_DB
-                                )
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        CategoryQuickCard(
-                            title = "ZIP & APK",
-                            subtitle = "Pack & Inspect",
-                            icon = Icons.Default.Archive,
-                            accentColor = PurpleArchive,
-                            isSelected = state.selectedCategoryFilter == FileFormatCategory.ARCHIVE_ZIP,
-                            onClick = {
-                                onSelectCategoryCard(
-                                    if (state.selectedCategoryFilter == FileFormatCategory.ARCHIVE_ZIP) null else FileFormatCategory.ARCHIVE_ZIP
-                                )
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        CategoryQuickCard(
-                            title = "Media",
-                            subtitle = "Audio & Video",
-                            icon = Icons.Default.Audiotrack,
-                            accentColor = RoseMedia,
-                            isSelected = state.selectedCategoryFilter == FileFormatCategory.VIDEO,
-                            onClick = {
-                                onSelectCategoryCard(
-                                    if (state.selectedCategoryFilter == FileFormatCategory.VIDEO) null else FileFormatCategory.VIDEO
-                                )
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        CategoryQuickCard(
-                            title = "Safe Vault",
-                            subtitle = "Wrapped DEK",
-                            icon = Icons.Default.Lock,
-                            accentColor = EmeraldVault,
-                            isSelected = false,
-                            onClick = onOpenSecureVaultTab,
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-            }
-
-            // 4. Search, Multi-Select Toggle & Sort Toolbar
-            item {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        OutlinedTextField(
-                            value = state.searchQuery,
-                            onValueChange = { onSearchChanged(it, state.useRegexSearch) },
-                            placeholder = {
-                                Text(if (state.isAdvancedMode && state.useRegexSearch) "Regex pattern (e.g. .*\\.kt$)" else "Search files in folder...")
-                            },
-                            leadingIcon = {
-                                Icon(Icons.Default.Search, contentDescription = "Search")
-                            },
-                            singleLine = true,
-                            shape = RoundedCornerShape(14.dp),
-                            modifier = Modifier
-                                .weight(1f)
-                                .testTag("file_search_input")
-                        )
-
-                        IconButton(
-                            onClick = onSelectAllInDir,
-                            modifier = Modifier.testTag("select_all_files_btn")
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.SelectAll,
-                                contentDescription = "Select All Files",
-                                tint = if (state.selectedFilePaths.isNotEmpty()) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-
-                        Box {
-                            OutlinedButton(
-                                onClick = { sortMenuExpanded = true },
-                                shape = RoundedCornerShape(12.dp)
-                            ) {
-                                Icon(Icons.Default.FilterList, contentDescription = "Sort", modifier = Modifier.size(18.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Sort")
-                            }
-                            DropdownMenu(
-                                expanded = sortMenuExpanded,
-                                onDismissRequest = { sortMenuExpanded = false }
-                            ) {
-                                SortOption.entries.forEach { opt ->
-                                    DropdownMenuItem(
-                                        text = { Text(opt.label) },
-                                        onClick = {
-                                            onSortChanged(opt)
-                                            sortMenuExpanded = false
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // Advanced Mode Quick Actions Row
-                    if (state.isAdvancedMode) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .horizontalScroll(rememberScrollState()),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            FilterChip(
-                                selected = state.useRegexSearch,
-                                onClick = { onSearchChanged(state.searchQuery, !state.useRegexSearch) },
-                                label = { Text("Regex Match") }
-                            )
-                            OutlinedButton(onClick = onShowBatchRenameDialog) {
-                                Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Batch Regex Rename")
-                            }
-                            OutlinedButton(onClick = onBookmarkCurrentDir) {
-                                Icon(Icons.Default.BookmarkAdd, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(4.dp))
-                                Text("Bookmark Path")
-                            }
-                        }
-                    }
-                }
-            }
-
-            // 5. Breadcrumb Navigation & New File/Folder Button
-            item {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+            // Clean Breadcrumb Trail
+            if (state.directoryStack.isNotEmpty() && state.selectedCategoryFilter == null) {
+                LazyRow(
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .weight(1f)
-                            .horizontalScroll(rememberScrollState()),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        state.directoryStack.forEachIndexed { idx, pathItem ->
-                            val label = pathItem.substringAfterLast('/').ifBlank { "Internal Root" }
-                            Surface(
-                                shape = RoundedCornerShape(8.dp),
-                                color = if (idx == state.directoryStack.lastIndex) {
-                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
-                                } else {
-                                    Color.Transparent
-                                },
-                                modifier = Modifier.clickable { onNavigateBreadcrumb(pathItem) }
-                            ) {
-                                Text(
-                                    text = label,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = if (idx == state.directoryStack.lastIndex) {
-                                        MaterialTheme.colorScheme.primary
-                                    } else {
-                                        MaterialTheme.colorScheme.onSurfaceVariant
-                                    },
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
-                                )
-                            }
-                            if (idx < state.directoryStack.lastIndex) {
-                                Icon(
-                                    imageVector = Icons.Default.ChevronRight,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(16.dp)
-                                )
+                    items(state.directoryStack) { dirPath ->
+                        val isLast = dirPath == state.directoryStack.last()
+                        val displayName = when {
+                            dirPath.endsWith("/0") -> "Internal"
+                            dirPath.startsWith("content://") -> "SAF"
+                            else -> dirPath.substringAfterLast('/').ifBlank { "Root" }
+                        }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = displayName,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = if (isLast) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isLast) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(6.dp))
+                                    .combinedClickable(onClick = { onNavigateBreadcrumb(dirPath) })
+                                    .padding(horizontal = 6.dp, vertical = 3.dp)
+                            )
+                            if (!isLast) {
+                                Text("/", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f))
                             }
                         }
-                    }
-
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Button(
-                        onClick = onShowCreateDialog,
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.testTag("new_file_or_folder_btn")
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = "New File or Folder", modifier = Modifier.size(18.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("New")
                     }
                 }
             }
 
-            // 6. Directory Files & Folders List
-            if (state.files.isEmpty()) {
-                item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(28.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.FolderOpen,
-                                contentDescription = "Empty Directory",
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(48.dp)
-                            )
-                            Text(
-                                text = "This folder is empty",
-                                style = MaterialTheme.typography.titleMedium
-                            )
-                            Text(
-                                text = "Tap '+ New' to create a file or folder, or switch storage volumes above.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            } else {
-                items(state.files, key = { it.path }) { node ->
-                    val isSelected = state.selectedFilePaths.contains(node.path)
-                    FileNodeRowCard(
-                        node = node,
-                        isSelected = isSelected,
-                        isAdvancedMode = state.isAdvancedMode,
-                        onTap = { onFileTapped(node) },
-                        onToggleSelect = { onToggleSelectFile(node) },
-                        onCopySingle = { onStageSingleClipboard(node, false) },
-                        onMoveSingle = { onStageSingleClipboard(node, true) },
-                        onEncryptToVault = { onEncryptToVault(node) },
-                        onInspectChecksums = { onInspectChecksums(node) },
-                        onRequestRename = {
-                            renameTargetNode = node
-                            renameInputText = node.name
-                        },
-                        onDelete = { onDeleteFile(node) }
-                    )
-                }
-            }
-        }
-
-        // 7. Bottom Stack: One-Tap Undo Banner + Floating Multi-Select & Clipboard Action Dock
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            state.lastUndoOperation?.let { undoOp ->
-                Card(
+            // Clipboard Paste Bar (when Cut/Copy active)
+            AnimatedVisibility(visible = state.clipboardState.isActive) {
+                Surface(
+                    color = MaterialTheme.colorScheme.primaryContainer,
                     shape = RoundedCornerShape(14.dp),
-                    elevation = CardDefaults.cardElevation(defaultElevation = 8.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.inverseSurface
-                    ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("one_tap_undo_banner")
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Undo,
-                                contentDescription = "Undo Available",
-                                tint = MaterialTheme.colorScheme.inversePrimary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = undoOp.summaryLabel,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.inverseOnSurface,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            TextButton(
-                                onClick = onExecuteUndo,
-                                modifier = Modifier.testTag("execute_undo_btn")
-                            ) {
-                                Text(
-                                    text = "UNDO",
-                                    fontWeight = FontWeight.Bold,
-                                    color = MaterialTheme.colorScheme.inversePrimary
-                                )
-                            }
-                            IconButton(
-                                onClick = onDismissUndo,
-                                modifier = Modifier.size(28.dp)
-                            ) {
-                                Icon(
-                                    imageVector = Icons.Default.Clear,
-                                    contentDescription = "Dismiss Undo",
-                                    tint = MaterialTheme.colorScheme.inverseOnSurface,
-                                    modifier = Modifier.size(16.dp)
-                                )
+                        Text(
+                            text = "${if (state.clipboardState.isMoveOperation) "Move" else "Copy"} ${state.clipboardState.sourceNodes.size} item(s)",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            TextButton(onClick = onClearClipboard) { Text("Cancel") }
+                            Button(onClick = onPasteClipboardHere) {
+                                Icon(Icons.Default.ContentPaste, null, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Paste")
                             }
                         }
                     }
                 }
             }
 
-            if (state.selectedFilePaths.isNotEmpty() || state.clipboardState.isActive) {
-                FloatingBatchAndClipboardDock(
-                    state = state,
-                    onCopySelected = { onStageBatchClipboard(false) },
-                    onMoveSelected = { onStageBatchClipboard(true) },
-                    onZipSelected = onShowBatchZipDialog,
-                    onEncryptSelected = onBatchEncryptSelected,
-                    onDeleteSelected = onBatchDeleteSelected,
-                    onClearSelection = onClearSelection,
-                    onSetConflictPolicy = onSetConflictPolicy,
-                    onPasteHere = onPasteClipboardHere,
-                    onClearClipboard = onClearClipboard,
-                    modifier = Modifier.fillMaxWidth()
-                )
+            // Undo Banner
+            AnimatedVisibility(visible = state.lastUndoOperation != null) {
+                state.lastUndoOperation?.let { undo ->
+                    Surface(
+                        color = MaterialTheme.colorScheme.inverseSurface,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = undo.summaryLabel,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.inverseOnSurface,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            TextButton(onClick = onExecuteUndo) {
+                                Icon(Icons.AutoMirrored.Filled.Undo, null, tint = MaterialTheme.colorScheme.inversePrimary, modifier = Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("Undo", color = MaterialTheme.colorScheme.inversePrimary)
+                            }
+                            IconButton(onClick = onDismissUndo, modifier = Modifier.size(32.dp)) {
+                                Icon(Icons.Default.Close, contentDescription = "Dismiss", tint = MaterialTheme.colorScheme.inverseOnSurface, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ==================== CLEAN SINGLE-COLUMN FILE LIST ====================
+            if (state.files.isEmpty() && !state.isLoading) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Folder,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                            modifier = Modifier.size(52.dp)
+                        )
+                        Text(
+                            text = if (state.searchQuery.isNotBlank()) "No matching files" else "Empty folder",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .testTag("explorer_file_list"),
+                    contentPadding = PaddingValues(top = 4.dp, bottom = 92.dp)
+                ) {
+                    items(state.files, key = { it.path }) { node ->
+                        val isSelected = state.selectedFilePaths.contains(node.path)
+                        CleanFileListRow(
+                            node = node,
+                            isSelected = isSelected,
+                            isSelectionMode = isSelectionMode,
+                            isAdvancedMode = state.isAdvancedMode,
+                            onTap = { onFileTapped(node) },
+                            onLongPress = { onToggleSelectFile(node) },
+                            onCopy = { onStageSingleClipboard(node, false) },
+                            onMove = { onStageSingleClipboard(node, true) },
+                            onRename = {
+                                renameTarget = node
+                                renameInput = node.name
+                            },
+                            onDelete = { onDeleteFile(node) },
+                            onLockToVault = { onEncryptToVault(node) },
+                            onShare = { onShareFile(node) },
+                            onOpenExternal = { onOpenExternal(node) },
+                            onDetails = { onInspectChecksums(node) }
+                        )
+                    }
+                }
+            }
+        }
+
+        // ==================== FLOATING MULTI-SELECT DOCK OR CREATE FAB ====================
+        if (isSelectionMode) {
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer,
+                tonalElevation = 6.dp,
+                shape = RoundedCornerShape(22.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp)
+                    .testTag("explorer_multiselect_dock")
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onClearSelection) {
+                            Icon(Icons.Default.Close, contentDescription = "Cancel Selection")
+                        }
+                        Text(
+                            "${state.selectedFilePaths.size}",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onSelectAllInDir) {
+                            Icon(Icons.Default.SelectAll, contentDescription = "Select All")
+                        }
+                        IconButton(onClick = { onStageBatchClipboard(false) }) {
+                            Icon(Icons.Default.ContentCopy, contentDescription = "Copy")
+                        }
+                        IconButton(onClick = { onStageBatchClipboard(true) }) {
+                            Icon(Icons.Default.ContentCut, contentDescription = "Move")
+                        }
+                        IconButton(onClick = onShowBatchZipDialog) {
+                            Icon(Icons.Default.FolderZip, contentDescription = "Zip")
+                        }
+                        IconButton(onClick = onBatchEncryptSelected) {
+                            Icon(Icons.Default.Lock, contentDescription = "Vault")
+                        }
+                        IconButton(onClick = onBatchDeleteSelected) {
+                            Icon(Icons.Default.Delete, contentDescription = "Delete", tint = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                }
+            }
+        } else {
+            FloatingActionButton(
+                onClick = onShowCreateDialog,
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp)
+                    .testTag("explorer_create_fab")
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "New File or Folder")
             }
         }
     }
 
-    if (renameTargetNode != null) {
-        val target = renameTargetNode!!
+    renameTarget?.let { target ->
         AlertDialog(
-            onDismissRequest = { renameTargetNode = null },
-            title = { Text("Rename '${target.name}'") },
+            onDismissRequest = { renameTarget = null },
+            title = { Text("Rename") },
             text = {
                 OutlinedTextField(
-                    value = renameInputText,
-                    onValueChange = { renameInputText = it },
-                    label = { Text("New File/Folder Name") },
+                    value = renameInput,
+                    onValueChange = { renameInput = it },
                     singleLine = true,
+                    label = { Text("Name") },
                     modifier = Modifier.fillMaxWidth()
                 )
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        if (renameInputText.isNotBlank()) {
-                            onRenameFile(target, renameInputText)
-                            renameTargetNode = null
-                        }
+                Button(onClick = {
+                    if (renameInput.isNotBlank() && renameInput != target.name) {
+                        onRenameFile(target, renameInput.trim())
                     }
-                ) {
-                    Text("Rename")
-                }
+                    renameTarget = null
+                }) { Text("Rename") }
             },
-            dismissButton = {
-                TextButton(onClick = { renameTargetNode = null }) {
-                    Text("Cancel")
-                }
-            }
+            dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("Cancel") } }
         )
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun FloatingBatchAndClipboardDock(
-    state: ExplorerUiState,
-    onCopySelected: () -> Unit,
-    onMoveSelected: () -> Unit,
-    onZipSelected: () -> Unit,
-    onEncryptSelected: () -> Unit,
-    onDeleteSelected: () -> Unit,
-    onClearSelection: () -> Unit,
-    onSetConflictPolicy: (ConflictPolicy) -> Unit,
-    onPasteHere: () -> Unit,
-    onClearClipboard: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        shape = RoundedCornerShape(18.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 10.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        ),
-        modifier = modifier
-            .border(1.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(18.dp))
-            .testTag("floating_batch_action_dock")
-    ) {
-        Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            if (state.selectedFilePaths.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = "${state.selectedFilePaths.size} Item(s) Selected",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    TextButton(onClick = onClearSelection) {
-                        Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Clear")
-                    }
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Button(
-                        onClick = onCopySelected,
-                        modifier = Modifier.testTag("batch_copy_btn")
-                    ) {
-                        Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Copy")
-                    }
-                    Button(
-                        onClick = onMoveSelected,
-                        modifier = Modifier.testTag("batch_move_btn")
-                    ) {
-                        Icon(Icons.Default.ContentCut, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Move")
-                    }
-                    OutlinedButton(
-                        onClick = onZipSelected,
-                        modifier = Modifier.testTag("batch_zip_btn")
-                    ) {
-                        Icon(Icons.Default.FolderZip, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("ZIP")
-                    }
-                    OutlinedButton(
-                        onClick = onEncryptSelected,
-                        modifier = Modifier.testTag("batch_vault_btn")
-                    ) {
-                        Icon(Icons.Default.Lock, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Vault")
-                    }
-                    OutlinedButton(
-                        onClick = onDeleteSelected,
-                        modifier = Modifier.testTag("batch_delete_btn")
-                    ) {
-                        Icon(
-                            Icons.Default.Delete,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("Delete", color = MaterialTheme.colorScheme.error)
-                    }
-                }
-            } else if (state.clipboardState.isActive) {
-                val clip = state.clipboardState
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "${if (clip.isMoveOperation) "Move" else "Copy"} Clipboard: ${clip.sourceNodes.size} item(s)",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.primary
-                        )
-                        Text(
-                            text = "Conflict Resolution Policy:",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Button(
-                            onClick = onPasteHere,
-                            modifier = Modifier.testTag("paste_clipboard_here_btn")
-                        ) {
-                            Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("Paste Here")
-                        }
-                        IconButton(onClick = onClearClipboard) {
-                            Icon(Icons.Default.Clear, contentDescription = "Cancel Clipboard")
-                        }
-                    }
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    ConflictPolicy.entries.forEach { policy ->
-                        FilterChip(
-                            selected = clip.conflictPolicy == policy,
-                            onClick = { onSetConflictPolicy(policy) },
-                            label = { Text(policy.label) }
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LumaStorageHeroCard(
-    state: ExplorerUiState,
-    onRequestAllFilesAccess: () -> Unit,
-    onRequestSafFolderMount: () -> Unit
-) {
-    val activeRoot = state.storageRoots.firstOrNull { state.currentPath.startsWith(it.path) }
-        ?: state.storageRoots.firstOrNull()
-    val totalBytes = activeRoot?.totalBytes ?: (64L * 1024 * 1024 * 1024)
-    val freeBytes = activeRoot?.freeBytes ?: (32L * 1024 * 1024 * 1024)
-    val usedBytes = (totalBytes - freeBytes).coerceAtLeast(0L)
-    val usedFraction = if (totalBytes > 0) (usedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0.05f, 1f) else 0.5f
-
-    val showAccessControlButtons = !state.hasAllFilesAccess && !state.isPermissionDecisionRemembered
-    val cardHeight = if (showAccessControlButtons) 172.dp else 124.dp
-
-    Card(
-        shape = RoundedCornerShape(20.dp),
-        modifier = Modifier.fillMaxWidth(),
-        elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-    ) {
-        Box(modifier = Modifier.fillMaxWidth()) {
-            Image(
-                painter = painterResource(id = R.drawable.img_luma_hero_banner_1795684570893),
-                contentDescription = "Luma Files Storage Telemetry Banner",
-                contentScale = ContentScale.Crop,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(cardHeight)
-            )
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(cardHeight)
-                    .background(
-                        Brush.verticalGradient(
-                            colors = listOf(
-                                Color(0xCC0B0F17),
-                                Color(0xF20B0F17)
-                            )
-                        )
-                    )
-                    .padding(14.dp)
-            ) {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    verticalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "LUMA FILES v1.2.0 • STORAGE ENGINE",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = ElectricCyan
-                            )
-                            Text(
-                                text = activeRoot?.title ?: "Internal Shared Storage",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Surface(
-                            shape = RoundedCornerShape(10.dp),
-                            color = if (state.hasAllFilesAccess) {
-                                EmeraldVault.copy(alpha = 0.25f)
-                            } else {
-                                ElectricCyan.copy(alpha = 0.22f)
-                            },
-                            modifier = Modifier.clickable { onRequestAllFilesAccess() }
-                        ) {
-                            Text(
-                                text = if (state.hasAllFilesAccess) "ALL FILES ACTIVE" else "STORAGE SETTINGS",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = if (state.hasAllFilesAccess) EmeraldVault else ElectricCyan,
-                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp)
-                            )
-                        }
-                    }
-
-                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Text(
-                                text = "Used: ${LumaFormatUtils.formatBytes(usedBytes)}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = Color.White
-                            )
-                            Text(
-                                text = "Free: ${LumaFormatUtils.formatBytes(freeBytes)} / ${LumaFormatUtils.formatBytes(totalBytes)}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = ElectricCyan
-                            )
-                        }
-                        LinearProgressIndicator(
-                            progress = { usedFraction },
-                            color = ElectricCyan,
-                            trackColor = Color.White.copy(alpha = 0.2f),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(8.dp)
-                                .clip(RoundedCornerShape(4.dp))
-                        )
-                    }
-
-                    if (showAccessControlButtons) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
-                            Button(
-                                onClick = onRequestAllFilesAccess,
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("grant_all_files_access_btn")
-                            ) {
-                                Icon(Icons.Default.Security, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "All Files Access",
-                                    style = MaterialTheme.typography.labelLarge
-                                )
-                            }
-                            OutlinedButton(
-                                onClick = onRequestSafFolderMount,
-                                shape = RoundedCornerShape(10.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("mount_saf_folder_btn")
-                            ) {
-                                Icon(
-                                    Icons.Default.CreateNewFolder,
-                                    contentDescription = null,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(16.dp)
-                                )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "Mount SAF Folder",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = Color.White
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun CategoryQuickCard(
-    title: String,
-    subtitle: String,
-    icon: ImageVector,
-    accentColor: Color,
-    isSelected: Boolean,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier
-) {
-    Card(
-        modifier = modifier
-            .clip(RoundedCornerShape(14.dp))
-            .border(
-                width = if (isSelected) 2.dp else 1.dp,
-                color = if (isSelected) accentColor else MaterialTheme.colorScheme.outline.copy(alpha = 0.5f),
-                shape = RoundedCornerShape(14.dp)
-            )
-            .clickable { onClick() },
-        colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) {
-                accentColor.copy(alpha = 0.16f)
-            } else {
-                MaterialTheme.colorScheme.surface
-            }
-        )
-    ) {
-        Row(
-            modifier = Modifier.padding(10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(32.dp)
-                    .background(accentColor.copy(alpha = 0.18f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = title,
-                    tint = accentColor,
-                    modifier = Modifier.size(18.dp)
-                )
-            }
-            Spacer(modifier = Modifier.width(8.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.labelLarge,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun FileNodeRowCard(
+private fun CleanFileListRow(
     node: FileNode,
     isSelected: Boolean,
+    isSelectionMode: Boolean,
     isAdvancedMode: Boolean,
     onTap: () -> Unit,
-    onToggleSelect: () -> Unit,
-    onCopySingle: () -> Unit,
-    onMoveSingle: () -> Unit,
-    onEncryptToVault: () -> Unit,
-    onInspectChecksums: () -> Unit,
-    onRequestRename: () -> Unit,
-    onDelete: () -> Unit
+    onLongPress: () -> Unit,
+    onCopy: () -> Unit,
+    onMove: () -> Unit,
+    onRename: () -> Unit,
+    onDelete: () -> Unit,
+    onLockToVault: () -> Unit,
+    onShare: () -> Unit,
+    onOpenExternal: () -> Unit,
+    onDetails: () -> Unit
 ) {
-    var menuExpanded by remember { mutableStateOf(false) }
+    var showMenu by remember { mutableStateOf(false) }
+    val (icon, tint) = remember(node.category, node.isDirectory) { fileBadgeStyle(node) }
 
-    val (icon, tint) = when (node.category) {
-        FileFormatCategory.DIRECTORY -> Icons.Default.Folder to ElectricCyan
-        FileFormatCategory.MARKDOWN, FileFormatCategory.TEXT_CODE, FileFormatCategory.STRUCTURED_DATA ->
-            Icons.Default.Code to ElectricCyan
-        FileFormatCategory.CSV_TSV -> Icons.Default.TableChart to EmeraldVault
-        FileFormatCategory.SQLITE_DB -> Icons.Default.Storage to AmberAdvanced
-        FileFormatCategory.APK_PACKAGE -> Icons.Default.Android to EmeraldVault
-        FileFormatCategory.PDF -> Icons.Default.PictureAsPdf to RoseMedia
-        FileFormatCategory.DOCX -> Icons.Default.Description to BlueDoc
-        FileFormatCategory.ARCHIVE_ZIP -> Icons.Default.Archive to PurpleArchive
-        FileFormatCategory.VIDEO -> Icons.Default.Movie to RoseMedia
-        FileFormatCategory.AUDIO -> Icons.Default.Audiotrack to EmeraldVault
-        FileFormatCategory.IMAGE -> Icons.Default.Image to AmberAdvanced
-        FileFormatCategory.BINARY_HEX -> Icons.AutoMirrored.Filled.InsertDriveFile to MaterialTheme.colorScheme.secondary
-    }
+    val rowBg = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f) else Color.Transparent
 
-    Card(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .border(
-                width = if (isSelected) 2.dp else 0.dp,
-                color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
-                shape = RoundedCornerShape(14.dp)
+            .background(rowBg)
+            .combinedClickable(
+                onClick = onTap,
+                onLongClick = onLongPress
             )
-            .clickable { onTap() }
-            .testTag("file_row_${node.name}"),
-        colors = CardDefaults.cardColors(
-            containerColor = if (isSelected) {
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
-            } else {
-                MaterialTheme.colorScheme.surface
-            }
-        )
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
     ) {
-        Row(
+        // Minimal 40dp Tinted Icon Badge
+        Box(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .size(40.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(if (isSelected) MaterialTheme.colorScheme.primary else tint.copy(alpha = 0.14f)),
+            contentAlignment = Alignment.Center
         ) {
-            IconButton(
-                onClick = onToggleSelect,
-                modifier = Modifier
-                    .size(36.dp)
-                    .testTag("select_file_${node.name}")
-            ) {
-                Icon(
-                    imageVector = if (isSelected) Icons.Default.CheckBox else Icons.Default.CheckBoxOutlineBlank,
-                    contentDescription = "Select ${node.name}",
-                    tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
-                )
+            if (isSelected) {
+                Icon(Icons.Default.CheckCircle, contentDescription = "Selected", tint = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.size(22.dp))
+            } else {
+                Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(22.dp))
             }
+        }
 
-            Spacer(modifier = Modifier.width(4.dp))
+        Spacer(Modifier.width(14.dp))
 
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .background(tint.copy(alpha = 0.15f), RoundedCornerShape(12.dp)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = node.category.label,
-                    tint = tint,
-                    modifier = Modifier.size(22.dp)
-                )
+        // Concise 2-Line File Metadata
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = node.name,
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            val meta = buildString {
+                if (node.isDirectory) {
+                    append("${node.childCount} items")
+                } else {
+                    append(LumaFormatUtils.formatBytes(node.sizeBytes))
+                }
+                val date = LumaFormatUtils.formatCompactDate(node.lastModified)
+                if (date.isNotBlank()) {
+                    append(" · ")
+                    append(date)
+                }
+                if (isAdvancedMode && node.permissionsRwx.isNotBlank()) {
+                    append(" · ")
+                    append(node.permissionsRwx.take(10))
+                }
             }
+            Text(
+                text = meta,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
 
-            Spacer(modifier = Modifier.width(12.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    Text(
-                        text = node.name,
-                        style = MaterialTheme.typography.titleMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false)
+        if (!isSelectionMode) {
+            Box {
+                IconButton(onClick = { showMenu = true }) {
+                    Icon(
+                        Icons.Default.MoreVert,
+                        contentDescription = "File Options",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(20.dp)
                     )
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = tint.copy(alpha = 0.18f)
-                    ) {
-                        Text(
-                            text = node.category.badgeText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = tint,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                }
+                DropdownMenu(expanded = showMenu, onDismissRequest = { showMenu = false }) {
+                    if (!node.isDirectory) {
+                        DropdownMenuItem(
+                            text = { Text("Share") },
+                            leadingIcon = { Icon(Icons.Default.Share, null) },
+                            onClick = { showMenu = false; onShare() }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Open with…") },
+                            leadingIcon = { Icon(Icons.Default.OpenInNew, null) },
+                            onClick = { showMenu = false; onOpenExternal() }
                         )
                     }
-                }
-
-                Spacer(modifier = Modifier.height(2.dp))
-
-                val sizeOrItems = if (node.isDirectory) {
-                    "${node.childCount} items"
-                } else {
-                    LumaFormatUtils.formatBytes(node.sizeBytes)
-                }
-
-                Text(
-                    text = "$sizeOrItems • ${LumaFormatUtils.formatTimestamp(node.lastModified)}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-
-                if (isAdvancedMode) {
-                    Text(
-                        text = "POSIX: ${node.permissionsRwx} • MIME: ${node.mimeType}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.tertiary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
-
-            Box {
-                IconButton(
-                    onClick = { menuExpanded = true },
-                    modifier = Modifier.testTag("file_menu_${node.name}")
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.MoreVert,
-                        contentDescription = "File Actions"
-                    )
-                }
-
-                DropdownMenu(
-                    expanded = menuExpanded,
-                    onDismissRequest = { menuExpanded = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text(if (node.isDirectory) "Open Directory" else "View / Edit in Studio...") },
-                        leadingIcon = { Icon(Icons.Default.FolderOpen, contentDescription = null) },
-                        onClick = {
-                            menuExpanded = false
-                            onTap()
-                        }
-                    )
                     DropdownMenuItem(
                         text = { Text("Copy") },
-                        leadingIcon = { Icon(Icons.Default.ContentCopy, contentDescription = null) },
-                        onClick = {
-                            menuExpanded = false
-                            onCopySingle()
-                        }
+                        leadingIcon = { Icon(Icons.Default.ContentCopy, null) },
+                        onClick = { showMenu = false; onCopy() }
                     )
                     DropdownMenuItem(
-                        text = { Text("Move (Cut)") },
-                        leadingIcon = { Icon(Icons.Default.ContentCut, contentDescription = null) },
-                        onClick = {
-                            menuExpanded = false
-                            onMoveSingle()
-                        }
+                        text = { Text("Move") },
+                        leadingIcon = { Icon(Icons.Default.ContentCut, null) },
+                        onClick = { showMenu = false; onMove() }
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Rename") },
+                        leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, null) },
+                        onClick = { showMenu = false; onRename() }
                     )
                     if (!node.isDirectory) {
                         DropdownMenuItem(
-                            text = { Text("Lock & Shred into AES-256 Vault") },
-                            leadingIcon = { Icon(Icons.Default.Lock, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onEncryptToVault()
-                            }
-                        )
-                        DropdownMenuItem(
-                            text = { Text("MD5 / SHA-256 Checksums") },
-                            leadingIcon = { Icon(Icons.Default.Fingerprint, contentDescription = null) },
-                            onClick = {
-                                menuExpanded = false
-                                onInspectChecksums()
-                            }
+                            text = { Text("Lock to Vault") },
+                            leadingIcon = { Icon(Icons.Default.Lock, null) },
+                            onClick = { showMenu = false; onLockToVault() }
                         )
                     }
                     DropdownMenuItem(
-                        text = { Text("Rename") },
-                        leadingIcon = { Icon(Icons.Default.DriveFileRenameOutline, contentDescription = null) },
-                        onClick = {
-                            menuExpanded = false
-                            onRequestRename()
-                        }
+                        text = { Text("Details") },
+                        leadingIcon = { Icon(Icons.Default.Info, null) },
+                        onClick = { showMenu = false; onDetails() }
                     )
+                    HorizontalDivider()
                     DropdownMenuItem(
-                        text = { Text("Delete (Recycle Bin / Shred)", color = MaterialTheme.colorScheme.error) },
-                        leadingIcon = {
-                            Icon(
-                                Icons.Default.Delete,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        },
-                        onClick = {
-                            menuExpanded = false
-                            onDelete()
-                        }
+                        text = { Text("Delete", color = MaterialTheme.colorScheme.error) },
+                        leadingIcon = { Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error) },
+                        onClick = { showMenu = false; onDelete() }
                     )
                 }
             }
         }
+    }
+}
+
+private fun fileBadgeStyle(node: FileNode): Pair<ImageVector, Color> {
+    if (node.isDirectory) return Icons.Default.Folder to Color(0xFF3B82F6)
+    return when (node.category) {
+        FileFormatCategory.IMAGE -> Icons.Default.Image to Color(0xFFEC4899)
+        FileFormatCategory.VIDEO -> Icons.Default.VideoFile to Color(0xFF8B5CF6)
+        FileFormatCategory.AUDIO -> Icons.Default.AudioFile to Color(0xFF06B6D4)
+        FileFormatCategory.PDF -> Icons.Default.PictureAsPdf to Color(0xFFEF4444)
+        FileFormatCategory.DOCX -> Icons.Default.Description to Color(0xFF2563EB)
+        FileFormatCategory.CSV_TSV -> Icons.Default.TableChart to Color(0xFF10B981)
+        FileFormatCategory.ARCHIVE_ZIP -> Icons.Default.FolderZip to Color(0xFFF59E0B)
+        FileFormatCategory.APK_PACKAGE -> Icons.Default.Android to Color(0xFF22C55E)
+        FileFormatCategory.TEXT_CODE,
+        FileFormatCategory.MARKDOWN,
+        FileFormatCategory.STRUCTURED_DATA -> Icons.Default.Code to Color(0xFF6366F1)
+        FileFormatCategory.SQLITE_DB -> Icons.Default.Storage to Color(0xFF14B8A6)
+        else -> Icons.AutoMirrored.Filled.InsertDriveFile to Color(0xFF64748B)
     }
 }

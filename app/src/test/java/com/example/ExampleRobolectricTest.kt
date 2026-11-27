@@ -460,4 +460,89 @@ class ExampleRobolectricTest {
         assertEquals("8.00 MB/s", LumaFormatUtils.formatSpeed(8L * 1024L * 1024L))
         assertNotEquals("", LumaFormatUtils.formatBytes(1048576L))
     }
+
+    @Test
+    fun `verify V2 HLS m3u8 parser RFC-5987 Content-Disposition decoder PhotoAiStudioEngine color matrix and Vault zero-trace volatile preview`() = runBlocking {
+        // 1. HLS Master & Media Playlist Parsing
+        val masterM3u8 = """
+            #EXTM3U
+            #EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=854x480
+            low/prog_index.m3u8
+            #EXT-X-STREAM-INF:BANDWIDTH=6500000,RESOLUTION=1920x1080
+            hd/prog_index.m3u8
+        """.trimIndent()
+        val parsedMaster = FastDownloadEngine.parseHlsMasterPlaylist(
+            masterUrl = "https://cdn.example.com/hls/master.m3u8",
+            playlistBody = masterM3u8
+        )
+        assertEquals(2, parsedMaster.size)
+        assertEquals(1080, parsedMaster.first().heightPx)
+        assertEquals("https://cdn.example.com/hls/hd/prog_index.m3u8", parsedMaster.first().playlistUrl)
+
+        val mediaM3u8 = """
+            #EXTM3U
+            #EXT-X-TARGETDURATION:6
+            #EXTINF:6.0,
+            seg_001.ts
+            #EXTINF:6.0,
+            seg_002.ts
+            #EXT-X-ENDLIST
+        """.trimIndent()
+        val segments = FastDownloadEngine.parseHlsMediaSegments(
+            playlistUrl = "https://cdn.example.com/hls/hd/prog_index.m3u8",
+            playlistBody = mediaM3u8
+        )
+        assertEquals(2, segments.size)
+        assertEquals("https://cdn.example.com/hls/hd/seg_001.ts", segments[0])
+
+        // 2. RFC-5987 Content-Disposition filename decoding
+        val decodedName = FastDownloadEngine.parseContentDispositionFilename(
+            "attachment; filename=\"fallback.pdf\"; filename*=UTF-8''Annual%20Report%202026.pdf"
+        )
+        assertEquals("Annual Report 2026.pdf", decodedName)
+
+        // 3. PhotoAiStudioEngine 18+ presets & color matrix math
+        assertTrue(com.example.domain.engine.PhotoAiStudioEngine.FILTER_PRESETS.size >= 19)
+        val tealPreset = com.example.domain.engine.PhotoAiStudioEngine.FILTER_PRESETS.first { it.id == "teal_orange" }
+        val matrix = com.example.domain.engine.PhotoAiStudioEngine.buildCombinedColorMatrixArray(
+            preset = tealPreset,
+            filterIntensity = 0.8f,
+            adjustments = com.example.domain.model.PhotoAdjustments(brightness = 0.2f, contrast = 0.15f, saturation = 0.1f, warmth = 0.1f)
+        )
+        assertEquals(20, matrix.size)
+        assertTrue(matrix.all { it.isFinite() })
+
+        // 4. Seamless Vault volatile preview decrypt, edit re-encrypt, and zero-trace shred
+        val tempRoot = Files.createTempDirectory("luma_vault_v2_preview_test").toFile()
+        try {
+            val isolatedVaultDir = File(tempRoot, "no_backup/.luma_vault_v11")
+            val sourceDir = File(tempRoot, "public").apply { mkdirs() }
+            val cryptoEngine = CryptoVaultEngine(context = null, customVaultDir = isolatedVaultDir)
+            cryptoEngine.setupCredential("2468", VaultAuthMode.PIN_4, "City?", "Tokyo").getOrThrow()
+
+            val fileEngine = FileSystemAndFormatEngine(context = null, cryptoEngine = cryptoEngine, customWorkspaceDir = sourceDir)
+            val note = File(sourceDir, "Diary.txt").apply { writeText("Original private note") }
+            val entity = cryptoEngine.encryptFileToVault(with(fileEngine) { note.toFileNode() }, "2468", true).getOrThrow()
+
+            // Decrypt to volatile preview for seamless viewing
+            val previewFile = cryptoEngine.decryptVaultItemToVolatilePreview(entity, "2468").getOrThrow()
+            assertTrue(previewFile.exists())
+            assertEquals("Original private note", previewFile.readText())
+
+            // Edit preview and re-encrypt seamlessly back into .lvault
+            previewFile.writeText("Updated private note inside vault")
+            val updatedEntity = cryptoEngine.reEncryptEditedPreviewToVault(entity, previewFile, "2468").getOrThrow()
+
+            // Shred volatile preview and confirm zero trace left
+            cryptoEngine.shredAllVolatilePreviews()
+            assertFalse("Volatile preview must be shredded on close/stop", previewFile.exists())
+
+            // Verify updated encrypted item decrypts with edited content
+            val verifyFile = cryptoEngine.decryptVaultItemToVolatilePreview(updatedEntity, "2468").getOrThrow()
+            assertEquals("Updated private note inside vault", verifyFile.readText())
+            cryptoEngine.shredAllVolatilePreviews()
+        } finally {
+            tempRoot.deleteRecursively()
+        }
+    }
 }
