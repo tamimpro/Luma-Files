@@ -62,7 +62,8 @@ fun StudioEditorModal(
     onSwitchToHex: (FileNode, Long) -> Unit,
     onPatchHexByte: (FileNode, Long, String, Long) -> Unit,
     onOpenExternal: (FileNode) -> Unit,
-    onReportShareOrInstallError: (com.example.domain.model.DiagnosticError) -> Unit
+    onReportShareOrInstallError: (com.example.domain.model.DiagnosticError) -> Unit,
+    onOpenApiKeySettings: () -> Unit = {}
 ) {
     val context = LocalContext.current
 
@@ -90,7 +91,8 @@ fun StudioEditorModal(
                     onOpenExternal = onOpenExternal,
                     onTriggerAiAutoEnhance = onTriggerAiAutoEnhance,
                     onTriggerAiRemaster = onTriggerAiRemaster,
-                    onSaveEditedBitmap = onSaveEditedPhoto
+                    onSaveEditedBitmap = onSaveEditedPhoto,
+                    onOpenApiKeySettings = onOpenApiKeySettings
                 )
             }
 

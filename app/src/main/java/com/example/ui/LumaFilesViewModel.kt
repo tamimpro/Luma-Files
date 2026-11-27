@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Environment
+import android.webkit.CookieManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.local.BookmarkEntity
@@ -13,12 +14,14 @@ import com.example.data.local.LumaDatabase
 import com.example.data.local.LumaRepository
 import com.example.data.local.OperationLogEntity
 import com.example.data.local.VaultItemEntity
+import com.example.domain.engine.AiKeyVaultStore
 import com.example.domain.engine.CryptoVaultEngine
 import com.example.domain.engine.FastDownloadEngine
 import com.example.domain.engine.FileSystemAndFormatEngine
 import com.example.domain.engine.PersistedDownloadCheckpoint
 import com.example.domain.engine.PhotoAiStudioEngine
 import com.example.domain.model.AiEnhanceUiState
+import com.example.domain.model.BrowserHandoffRequest
 import com.example.domain.model.ClipboardState
 import com.example.domain.model.ConflictPolicy
 import com.example.domain.model.DiagnosticError
@@ -89,6 +92,13 @@ data class ExplorerUiState(
     val resolvedMediaManifest: ResolvedMediaManifest? = null,
     val selectedStreamVariantId: String = "",
     val sniffedWebMedia: List<SniffedWebMedia> = emptyList(),
+    val browserHandoffRequest: BrowserHandoffRequest? = null,
+    // Optional Personal Gemini API Key (for sideloaded APKs outside AI Studio)
+    val hasPersonalGeminiApiKey: Boolean = false,
+    val maskedGeminiApiKey: String = "",
+    val showAiApiKeyDialog: Boolean = false,
+    val isVerifyingAiApiKey: Boolean = false,
+    val aiApiKeyStatusMessage: String? = null,
     // Storage Analyzer State
     val analyzerReport: StorageAnalyzerReport? = null,
     val isAnalyzingStorage: Boolean = false,
@@ -108,8 +118,16 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
     private val repository = LumaRepository(database.lumaDao())
     val cryptoEngine = CryptoVaultEngine(application)
     val fileEngine = FileSystemAndFormatEngine(application, cryptoEngine)
-    val downloadEngine = FastDownloadEngine(repository, cryptoEngine, viewModelScope)
-    val photoEngine = PhotoAiStudioEngine()
+    val aiKeyVaultStore = AiKeyVaultStore(application)
+    val downloadEngine = FastDownloadEngine(
+        repository = repository,
+        cryptoEngine = cryptoEngine,
+        externalScope = viewModelScope,
+        cookieLookup = { url -> runCatching { CookieManager.getInstance().getCookie(url).orEmpty() }.getOrDefault("") }
+    )
+    val photoEngine = PhotoAiStudioEngine(
+        personalApiKeyProvider = { aiKeyVaultStore.getApiKey() }
+    )
 
     private val initialDefaultPath = fileEngine.getDefaultStartPath()
     private val initialHasAccess = fileEngine.hasAllFilesAccessPermission()
@@ -127,7 +145,9 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
             isPinConfigured = cryptoEngine.isPinConfigured(),
             configuredPinLength = cryptoEngine.getConfiguredPinLength(),
             vaultAuthMode = cryptoEngine.getConfiguredAuthMode(),
-            recoveryQuestion = cryptoEngine.getRecoveryQuestion()
+            recoveryQuestion = cryptoEngine.getRecoveryQuestion(),
+            hasPersonalGeminiApiKey = aiKeyVaultStore.hasApiKey(),
+            maskedGeminiApiKey = aiKeyVaultStore.getMaskedPreview()
         )
     )
     val uiState: StateFlow<ExplorerUiState> = _uiState.asStateFlow()
@@ -828,7 +848,72 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch { cryptoEngine.shredAllVolatilePreviews() }
     }
 
-    // ==================== AI PHOTO ENHANCE, EDIT SAVE & VIDEO SCREENSHOT ====================
+    // ==================== AI PHOTO ENHANCE, PERSONAL API KEY & VIDEO SCREENSHOT ====================
+
+    fun openAiApiKeyDialog() {
+        _uiState.update {
+            it.copy(
+                showAiApiKeyDialog = true,
+                aiApiKeyStatusMessage = null
+            )
+        }
+    }
+
+    fun dismissAiApiKeyDialog() {
+        _uiState.update {
+            it.copy(
+                showAiApiKeyDialog = false,
+                isVerifyingAiApiKey = false,
+                aiApiKeyStatusMessage = null
+            )
+        }
+    }
+
+    fun saveAndVerifyPersonalApiKey(rawKey: String) {
+        val trimmed = rawKey.trim()
+        if (trimmed.isBlank()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isVerifyingAiApiKey = true, aiApiKeyStatusMessage = null) }
+            val verifyResult = photoEngine.verifyPersonalApiKey(trimmed)
+            verifyResult.fold(
+                onSuccess = { msg ->
+                    aiKeyVaultStore.saveApiKey(trimmed)
+                    _uiState.update {
+                        it.copy(
+                            isVerifyingAiApiKey = false,
+                            hasPersonalGeminiApiKey = true,
+                            maskedGeminiApiKey = aiKeyVaultStore.getMaskedPreview(),
+                            aiApiKeyStatusMessage = msg,
+                            showAiApiKeyDialog = false,
+                            aiEnhanceState = AiEnhanceUiState.Idle,
+                            statusBannerMessage = "Personal Gemini API key saved"
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            isVerifyingAiApiKey = false,
+                            aiApiKeyStatusMessage = err.message ?: "Key verification failed"
+                        )
+                    }
+                }
+            )
+        }
+    }
+
+    fun clearPersonalApiKey() {
+        aiKeyVaultStore.clearApiKey()
+        _uiState.update {
+            it.copy(
+                hasPersonalGeminiApiKey = false,
+                maskedGeminiApiKey = "",
+                showAiApiKeyDialog = false,
+                aiApiKeyStatusMessage = null,
+                statusBannerMessage = "Switched back to Firebase AI"
+            )
+        }
+    }
 
     fun triggerAiAutoEnhance(
         sourceBitmap: Bitmap,
@@ -838,7 +923,12 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
             _uiState.update {
                 it.copy(aiEnhanceState = AiEnhanceUiState.Loading("Analyzing photo…"))
             }
-            val res = photoEngine.analyzeAndAutoEnhance(sourceBitmap)
+            val res = photoEngine.analyzeAndAutoEnhance(
+                sourceBitmap = sourceBitmap,
+                onProgress = { progressLabel ->
+                    _uiState.update { it.copy(aiEnhanceState = AiEnhanceUiState.Loading(progressLabel)) }
+                }
+            )
             res.fold(
                 onSuccess = { grade ->
                     _uiState.update {
@@ -847,10 +937,15 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                     onApplied(grade.adjustments, grade.recommendedFilterId, grade.summary)
                 },
                 onFailure = { err ->
+                    val (friendlyMsg, showKeyAction) = PhotoAiStudioEngine.formatFriendlyAiError(
+                        err,
+                        aiKeyVaultStore.hasApiKey()
+                    )
                     _uiState.update {
                         it.copy(
                             aiEnhanceState = AiEnhanceUiState.Error(
-                                err.message ?: "AI enhance unavailable"
+                                message = friendlyMsg,
+                                showApiKeyShortcut = showKeyAction
                             )
                         )
                     }
@@ -868,7 +963,13 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
             _uiState.update {
                 it.copy(aiEnhanceState = AiEnhanceUiState.Loading("Remastering with AI…"))
             }
-            val res = photoEngine.generateAiRemasteredPhoto(sourceBitmap, stylePrompt)
+            val res = photoEngine.generateAiRemasteredPhoto(
+                sourceBitmap = sourceBitmap,
+                stylePrompt = stylePrompt,
+                onProgress = { progressLabel ->
+                    _uiState.update { it.copy(aiEnhanceState = AiEnhanceUiState.Loading(progressLabel)) }
+                }
+            )
             res.fold(
                 onSuccess = { remastered ->
                     _uiState.update {
@@ -877,10 +978,15 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                     onResultBitmap(remastered)
                 },
                 onFailure = { err ->
+                    val (friendlyMsg, showKeyAction) = PhotoAiStudioEngine.formatFriendlyAiError(
+                        err,
+                        aiKeyVaultStore.hasApiKey()
+                    )
                     _uiState.update {
                         it.copy(
                             aiEnhanceState = AiEnhanceUiState.Error(
-                                err.message ?: "AI remaster failed"
+                                message = friendlyMsg,
+                                showApiKeyShortcut = showKeyAction
                             )
                         )
                     }
@@ -1422,6 +1528,10 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
         _uiState.update { it.copy(sniffedWebMedia = emptyList()) }
     }
 
+    fun consumeBrowserHandoff() {
+        _uiState.update { it.copy(browserHandoffRequest = null) }
+    }
+
     fun enqueueSniffedMediaDownload(media: SniffedWebMedia) {
         viewModelScope.launch {
             val downloadsDir = resolveDownloadsDirectory()
@@ -1432,11 +1542,12 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                 checkpoint = PersistedDownloadCheckpoint(
                     url = media.url,
                     threadCount = if (media.isHlsOrDash) 1 else 4,
+                    audioStreamUrl = media.audioStreamUrl.orEmpty(),
                     customUserAgent = media.userAgent,
                     refererHeader = media.referer,
                     cookieHeader = media.cookies,
                     isHlsPlaylist = media.isHlsOrDash,
-                    resolutionLabel = if (media.isHlsOrDash) "HLS" else "Original"
+                    resolutionLabel = media.qualityLabel.ifBlank { if (media.isHlsOrDash) "HLS" else "Original" }
                 )
             )
             val task = DownloadTaskEntity(
@@ -1463,12 +1574,23 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch {
             downloadEngine.resolveMediaStreamManifest(cleanUrl).fold(
                 onSuccess = { manifest ->
-                    _uiState.update {
-                        it.copy(
-                            isResolvingMediaUrl = false,
-                            resolvedMediaManifest = manifest,
-                            selectedStreamVariantId = manifest.recommendedVariantId
-                        )
+                    if (manifest.requiresBrowserSniffer && manifest.variants.isEmpty()) {
+                        _uiState.update {
+                            it.copy(
+                                isResolvingMediaUrl = false,
+                                resolvedMediaManifest = manifest,
+                                browserHandoffRequest = BrowserHandoffRequest(cleanUrl),
+                                statusBannerMessage = "Opened in Browser — play video to capture stream"
+                            )
+                        }
+                    } else {
+                        _uiState.update {
+                            it.copy(
+                                isResolvingMediaUrl = false,
+                                resolvedMediaManifest = manifest,
+                                selectedStreamVariantId = manifest.recommendedVariantId
+                            )
+                        }
                     }
                 },
                 onFailure = { err ->
@@ -1504,7 +1626,8 @@ class LumaFilesViewModel(application: Application) : AndroidViewModel(applicatio
                     it.copy(
                         isResolvingMediaUrl = false,
                         resolvedMediaManifest = manifest,
-                        statusBannerMessage = "Open this link in the Browser tab to capture the stream"
+                        browserHandoffRequest = BrowserHandoffRequest(cleanUrl),
+                        statusBannerMessage = "Opened in Browser — play video to capture stream"
                     )
                 }
                 return@launch

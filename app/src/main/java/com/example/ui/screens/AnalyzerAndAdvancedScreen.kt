@@ -17,10 +17,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Bookmark
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DriveFileRenameOutline
 import androidx.compose.material.icons.filled.FolderOpen
+import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.Button
@@ -242,6 +244,8 @@ fun AdvancedWorkstationHubScreen(
     onToggleAdvancedMode: () -> Unit,
     onOpenBatchRegexDialog: () -> Unit,
     onRequestAllFilesAccess: () -> Unit,
+    onOpenAiKeyDialog: () -> Unit,
+    onClearAiKey: () -> Unit,
     onJumpToBookmark: (BookmarkEntity) -> Unit,
     onRemoveBookmark: (Long) -> Unit,
     onClearLogs: () -> Unit
@@ -303,6 +307,73 @@ fun AdvancedWorkstationHubScreen(
                                 Icon(Icons.Default.Security, null, modifier = Modifier.size(16.dp))
                                 Spacer(Modifier.width(6.dp))
                                 Text("Storage Access")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // AI Photo Engine Card (Firebase AI default + Optional Personal Gemini API Key for sideloaded APKs)
+        item {
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.AutoAwesome, null, tint = MaterialTheme.colorScheme.primary)
+                            Column {
+                                Text("AI Photo Engine", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    text = if (state.hasPersonalGeminiApiKey) {
+                                        "Personal API Key (${state.maskedGeminiApiKey})"
+                                    } else {
+                                        "Firebase AI · Optional personal key for sideloaded APKs"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onOpenAiKeyDialog,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("tools_ai_key_btn")
+                        ) {
+                            Icon(Icons.Default.Key, null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(if (state.hasPersonalGeminiApiKey) "Update Key" else "Set API Key")
+                        }
+                        if (state.hasPersonalGeminiApiKey) {
+                            OutlinedButton(
+                                onClick = onClearAiKey,
+                                modifier = Modifier.testTag("tools_ai_key_clear_btn")
+                            ) {
+                                Text("Clear")
                             }
                         }
                     }

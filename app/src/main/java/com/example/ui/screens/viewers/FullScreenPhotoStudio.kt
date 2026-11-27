@@ -125,7 +125,8 @@ fun FullScreenPhotoStudio(
     onOpenExternal: (FileNode) -> Unit,
     onTriggerAiAutoEnhance: (Bitmap, onApplied: (PhotoAdjustments, String, String) -> Unit) -> Unit,
     onTriggerAiRemaster: (Bitmap, String, onResultBitmap: (Bitmap) -> Unit) -> Unit,
-    onSaveEditedBitmap: (FileNode, Bitmap, Boolean) -> Unit
+    onSaveEditedBitmap: (FileNode, Bitmap, Boolean) -> Unit,
+    onOpenApiKeySettings: () -> Unit = {}
 ) {
     val scope = rememberCoroutineScope()
 
@@ -664,15 +665,31 @@ fun FullScreenPhotoStudio(
                             modifier = Modifier.padding(horizontal = 16.dp)
                         )
                     }
-                    (aiEnhanceState as? AiEnhanceUiState.Error)?.message?.let { err ->
-                        Text(
-                            text = err,
-                            color = Color(0xFFFCA5A5),
-                            style = MaterialTheme.typography.labelSmall,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 16.dp)
-                        )
+                    (aiEnhanceState as? AiEnhanceUiState.Error)?.let { errState ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = errState.message,
+                                color = Color(0xFFFCA5A5),
+                                style = MaterialTheme.typography.labelSmall,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                            if (errState.showApiKeyShortcut) {
+                                TextButton(
+                                    onClick = onOpenApiKeySettings,
+                                    modifier = Modifier.testTag("photo_ai_set_key_btn")
+                                ) {
+                                    Text("Set API Key", color = Color(0xFF93C5FD))
+                                }
+                            }
+                        }
                     }
 
                     // Active Edit Tool Panel

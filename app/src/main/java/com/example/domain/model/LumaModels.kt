@@ -99,8 +99,13 @@ sealed interface AiEnhanceUiState {
     data object Idle : AiEnhanceUiState
     data class Loading(val label: String) : AiEnhanceUiState
     data class Success(val summary: String, val remasteredBitmap: Bitmap? = null) : AiEnhanceUiState
-    data class Error(val message: String) : AiEnhanceUiState
+    data class Error(val message: String, val showApiKeyShortcut: Boolean = false) : AiEnhanceUiState
 }
+
+data class BrowserHandoffRequest(
+    val url: String,
+    val sequenceId: Long = System.nanoTime()
+)
 
 data class SniffedWebMedia(
     val url: String,
@@ -112,6 +117,9 @@ data class SniffedWebMedia(
     val cookies: String = "",
     val userAgent: String = "",
     val isHlsOrDash: Boolean = false,
+    val audioStreamUrl: String? = null,
+    val qualityLabel: String = "",
+    val mediaKind: String = "VIDEO",
     val detectedAtMillis: Long = System.currentTimeMillis()
 )
 

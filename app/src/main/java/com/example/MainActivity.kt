@@ -69,6 +69,7 @@ import com.example.ui.components.DeleteChoiceDialog
 import com.example.ui.components.ExactDiagnosticErrorDialog
 import com.example.ui.components.FileChecksumInspectorDialog
 import com.example.ui.components.FirstLaunchPermissionOnboardingDialog
+import com.example.ui.components.GeminiApiKeyDialog
 import com.example.ui.components.RecycleBinModalSheet
 import com.example.ui.screens.AdvancedWorkstationHubScreen
 import com.example.ui.screens.DownloadManagerScreen
@@ -332,6 +333,8 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
                             resolvedManifest = state.resolvedMediaManifest,
                             selectedStreamVariantId = state.selectedStreamVariantId,
                             sniffedWebMedia = state.sniffedWebMedia,
+                            browserHandoffRequest = state.browserHandoffRequest,
+                            onConsumeBrowserHandoff = { viewModel.consumeBrowserHandoff() },
                             onInspectUrl = { url -> viewModel.inspectMediaUrl(url) },
                             onSelectStreamVariant = { id -> viewModel.selectMediaStreamVariant(id) },
                             onStartSmartDownload = { url, name, threads, expectedSha ->
@@ -358,6 +361,8 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
                                     allFilesSettingsLauncher.launch(LumaFormatUtils.buildAllFilesAccessIntent(context))
                                 }
                             },
+                            onOpenAiKeyDialog = { viewModel.openAiApiKeyDialog() },
+                            onClearAiKey = { viewModel.clearPersonalApiKey() },
                             onJumpToBookmark = { bm ->
                                 viewModel.navigateToDirectory(bm.pathOrUri, resetStack = true)
                                 viewModel.selectTab(LumaTab.EXPLORER)
@@ -408,7 +413,8 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
                         viewModel.showCustomDiagnosticError(diag)
                     }
                 },
-                onReportShareOrInstallError = { diag -> viewModel.showCustomDiagnosticError(diag) }
+                onReportShareOrInstallError = { diag -> viewModel.showCustomDiagnosticError(diag) },
+                onOpenApiKeySettings = { viewModel.openAiApiKeyDialog() }
             )
         }
     }
@@ -482,6 +488,18 @@ fun LumaFilesRootScreen(viewModel: LumaFilesViewModel) {
             selectedCount = state.selectedFilePaths.size,
             onConfirm = { archiveName -> viewModel.batchCompressSelectedToZip(archiveName) },
             onDismiss = { showBatchZipDialog = false }
+        )
+    }
+
+    if (state.showAiApiKeyDialog) {
+        GeminiApiKeyDialog(
+            hasExistingKey = state.hasPersonalGeminiApiKey,
+            maskedPreview = state.maskedGeminiApiKey,
+            isVerifying = state.isVerifyingAiApiKey,
+            statusMessage = state.aiApiKeyStatusMessage,
+            onSaveAndTest = { key -> viewModel.saveAndVerifyPersonalApiKey(key) },
+            onClearKey = { viewModel.clearPersonalApiKey() },
+            onDismiss = { viewModel.dismissAiApiKeyDialog() }
         )
     }
 

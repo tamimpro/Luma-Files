@@ -56,9 +56,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.local.DownloadTaskEntity
+import com.example.domain.model.BrowserHandoffRequest
 import com.example.domain.model.ResolvedMediaManifest
 import com.example.domain.model.SniffedWebMedia
 import com.example.ui.LumaFormatUtils
+import androidx.compose.runtime.LaunchedEffect
 
 @Composable
 fun DownloadManagerScreen(
@@ -68,6 +70,8 @@ fun DownloadManagerScreen(
     resolvedManifest: ResolvedMediaManifest?,
     selectedStreamVariantId: String,
     sniffedWebMedia: List<SniffedWebMedia>,
+    browserHandoffRequest: BrowserHandoffRequest?,
+    onConsumeBrowserHandoff: () -> Unit,
     onInspectUrl: (String) -> Unit,
     onSelectStreamVariant: (String) -> Unit,
     onStartSmartDownload: (url: String, fileName: String, threads: Int, expectedSha256: String) -> Unit,
@@ -81,7 +85,17 @@ fun DownloadManagerScreen(
     onDownloadSniffedMedia: (SniffedWebMedia) -> Unit
 ) {
     var activeSegment by remember { mutableIntStateOf(0) } // 0 = Downloads, 1 = Browser Sniffer
-    var browserSeedUrl by remember { mutableStateOf("https://m.youtube.com") }
+    var browserSeedUrl by remember { mutableStateOf("https://www.instagram.com") }
+    var browserHandoffSeq by remember { mutableStateOf(0L) }
+
+    LaunchedEffect(browserHandoffRequest?.sequenceId) {
+        browserHandoffRequest?.let { req ->
+            browserSeedUrl = req.url
+            browserHandoffSeq = req.sequenceId
+            activeSegment = 1
+            onConsumeBrowserHandoff()
+        }
+    }
 
     var urlInput by remember { mutableStateOf("") }
     var customFileName by remember { mutableStateOf("") }
@@ -123,6 +137,7 @@ fun DownloadManagerScreen(
         if (activeSegment == 1) {
             WebSnifferBrowserPane(
                 initialUrl = browserSeedUrl,
+                handoffSequenceId = browserHandoffSeq,
                 detectedMedia = sniffedWebMedia,
                 onMediaDetected = onMediaDetectedInBrowser,
                 onClearDetected = onClearDetectedMedia,
@@ -257,6 +272,7 @@ fun DownloadManagerScreen(
                                             Button(
                                                 onClick = {
                                                     browserSeedUrl = manifest.sourceUrl
+                                                    browserHandoffSeq = System.nanoTime()
                                                     activeSegment = 1
                                                 },
                                                 modifier = Modifier.fillMaxWidth()

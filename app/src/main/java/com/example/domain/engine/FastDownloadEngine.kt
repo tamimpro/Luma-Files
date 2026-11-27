@@ -85,7 +85,8 @@ data class HlsStreamInfo(
 class FastDownloadEngine(
     private val repository: LumaRepository,
     private val cryptoEngine: CryptoVaultEngine,
-    private val externalScope: CoroutineScope
+    private val externalScope: CoroutineScope,
+    private val cookieLookup: (String) -> String = { "" }
 ) {
 
     private val okHttpClient = OkHttpClient.Builder()
@@ -393,12 +394,31 @@ class FastDownloadEngine(
             require(cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")) {
                 "Enter a valid http:// or https:// URL."
             }
+            val effectiveCookies = cookies.ifBlank { runCatching { cookieLookup(cleanUrl) }.getOrDefault("") }
             val platform = detectPlatformName(cleanUrl)
 
-            // 1. Dedicated real extractors for major platforms
+            // 1. Dedicated real extractors for major social platforms
             when (platform) {
+                "Instagram" -> {
+                    val igCookies = effectiveCookies.ifBlank {
+                        runCatching { cookieLookup("https://www.instagram.com/") }.getOrDefault("")
+                    }
+                    val ig = SocialMediaExtractors.extractInstagramManifest(okHttpClient, cleanUrl, igCookies)
+                    if (ig != null && ig.variants.isNotEmpty()) return@withContext Result.success(ig)
+                }
+                "X" -> {
+                    val x = SocialMediaExtractors.extractXTwitterManifest(okHttpClient, cleanUrl)
+                    if (x != null && x.variants.isNotEmpty()) return@withContext Result.success(x)
+                }
+                "Facebook" -> {
+                    val fbCookies = effectiveCookies.ifBlank {
+                        runCatching { cookieLookup("https://www.facebook.com/") }.getOrDefault("")
+                    }
+                    val fb = SocialMediaExtractors.extractFacebookManifest(okHttpClient, cleanUrl, fbCookies)
+                    if (fb != null && fb.variants.isNotEmpty()) return@withContext Result.success(fb)
+                }
                 "YouTube" -> {
-                    val yt = extractYouTubeManifest(cleanUrl)
+                    val yt = extractYouTubeManifest(cleanUrl, effectiveCookies)
                     if (yt != null && yt.variants.isNotEmpty()) return@withContext Result.success(yt)
                 }
                 "TikTok" -> {
@@ -413,23 +433,23 @@ class FastDownloadEngine(
 
             // 2. Direct HLS .m3u8 playlist check
             if (cleanUrl.lowercase().contains(".m3u8")) {
-                val hlsManifest = extractHlsManifest(cleanUrl, referer, cookies, userAgent)
+                val hlsManifest = extractHlsManifest(cleanUrl, referer, effectiveCookies, userAgent)
                 if (hlsManifest != null) return@withContext Result.success(hlsManifest)
             }
 
             // 3. Probe headers with lightweight HEAD, falling back to GET if HEAD is blocked
-            val probe = probeRemoteUrl(cleanUrl, referer, cookies, userAgent)
+            val probe = probeRemoteUrl(cleanUrl, referer, effectiveCookies, userAgent)
             val ct = probe.contentType
 
             if (ct.contains("mpegurl") || cleanUrl.lowercase().contains(".m3u8")) {
-                val hlsManifest = extractHlsManifest(probe.finalUrl, referer, cookies, userAgent)
+                val hlsManifest = extractHlsManifest(probe.finalUrl, referer, effectiveCookies, userAgent)
                 if (hlsManifest != null) return@withContext Result.success(hlsManifest)
             }
 
             // 4. If response is an HTML webpage, inspect full body for real embedded media URLs
             if (ct.contains("text/html") || ct.contains("application/xhtml")) {
-                val htmlBody = fetchTextBody(probe.finalUrl, referer, cookies, DESKTOP_USER_AGENT)
-                val extracted = extractMediaFromHtmlPage(probe.finalUrl, platform, htmlBody, cookies)
+                val htmlBody = fetchTextBody(probe.finalUrl, referer, effectiveCookies, DESKTOP_USER_AGENT)
+                val extracted = extractMediaFromHtmlPage(probe.finalUrl, platform, htmlBody, effectiveCookies)
                 if (extracted != null) {
                     return@withContext Result.success(extracted)
                 }
@@ -447,7 +467,7 @@ class FastDownloadEngine(
                         variants = emptyList(),
                         recommendedVariantId = "",
                         requiresBrowserSniffer = true,
-                        browserSnifferReason = "Open in Built-in Browser to capture the live video stream."
+                        browserSnifferReason = "Opening in Built-in Browser to capture the live stream."
                     )
                 )
             }
@@ -588,21 +608,26 @@ class FastDownloadEngine(
     }
 
     /**
-     * Real YouTube InnerTube API extractor (ANDROID & IOS clients) extracting actual
+     * Real YouTube InnerTube API extractor (ANDROID_VR, IOS, TVHTML5, ANDROID clients) extracting actual
      * progressive + adaptive video/audio streams for lossless muxing.
      */
-    private fun extractYouTubeManifest(url: String): ResolvedMediaManifest? {
+    private fun extractYouTubeManifest(url: String, cookies: String = ""): ResolvedMediaManifest? {
         val videoId = extractYouTubeVideoId(url) ?: return null
         val clientConfigs = listOf(
             Triple(
-                "ANDROID",
-                "19.44.38",
-                "com.google.android.youtube/19.44.38 (Linux; U; Android 14) gzip"
+                "ANDROID_VR",
+                "1.60.19",
+                "com.google.android.apps.youtube.vr.oculus/1.60.19 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
             ),
             Triple(
                 "IOS",
                 "19.45.4",
                 "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)"
+            ),
+            Triple(
+                "ANDROID",
+                "19.44.38",
+                "com.google.android.youtube/19.44.38 (Linux; U; Android 14) gzip"
             )
         )
 
@@ -619,7 +644,7 @@ class FastDownloadEngine(
                                 put("clientVersion", clientVersion)
                                 put("hl", "en")
                                 put("gl", "US")
-                                if (clientName == "ANDROID") put("androidSdkVersion", 34)
+                                if (clientName.startsWith("ANDROID")) put("androidSdkVersion", 34)
                             }
                         )
                     )
@@ -627,12 +652,13 @@ class FastDownloadEngine(
                     put("racyCheckOk", true)
                 }.toString()
 
-                val req = Request.Builder()
+                val reqBuilder = Request.Builder()
                     .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
                     .header("User-Agent", ua)
                     .header("Content-Type", "application/json")
                     .post(payload.toRequestBody("application/json; charset=utf-8".toMediaType()))
-                    .build()
+                if (cookies.isNotBlank()) reqBuilder.header("Cookie", cookies)
+                val req = reqBuilder.build()
 
                 okHttpClient.newCall(req).execute().use { resp ->
                     if (!resp.isSuccessful) return@use null
@@ -820,8 +846,11 @@ class FastDownloadEngine(
      * Real TikTok watermark-free HD stream extractor using public JSON metadata.
      */
     private fun extractTikTokManifest(url: String): ResolvedMediaManifest? {
+        val resolvedUrl = if (url.contains("vm.tiktok.com", ignoreCase = true) || url.contains("vt.tiktok.com", ignoreCase = true)) {
+            SocialMediaExtractors.resolveRedirectUrl(okHttpClient, url)
+        } else url
         return runCatching {
-            val encoded = URLEncoder.encode(url, "UTF-8")
+            val encoded = URLEncoder.encode(resolvedUrl, "UTF-8")
             val req = Request.Builder()
                 .url("https://www.tikwm.com/api/?url=$encoded&hd=1")
                 .header("User-Agent", DEFAULT_USER_AGENT)
@@ -1853,6 +1882,13 @@ class FastDownloadEngine(
             }
             if (!resp.isSuccessful && resp.code != 206) {
                 throw IllegalStateException("HTTP ${resp.code} (${resp.message})")
+            }
+
+            // Anti-HTML corruption guard: never save an HTML login/error page as a video/archive/binary file
+            val respCt = resp.header("Content-Type")?.lowercase().orEmpty()
+            val targetExt = task.fileName.substringAfterLast('.', "").lowercase()
+            if (respCt.contains("text/html") && targetExt !in setOf("html", "htm", "txt", "")) {
+                throw IllegalStateException("HTTP 403: Server returned a webpage instead of .$targetExt media. Capture this link in the Browser tab.")
             }
 
             val isAppending = if (resp.code == 206 && existingBytes > 0) {
